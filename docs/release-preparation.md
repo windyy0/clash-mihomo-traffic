@@ -11,6 +11,11 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
+`cargo run --locked` 默认构建并启动 Debug 版。构建后也可在仓库根目录直接运行 `./target/debug/mihomo-traffic.exe`。
+
+- Debug 版默认使用仓库根目录的 `dev-data/`，其中存放 `config.toml`、`traffic.sqlite3` 和 `traffic.log`。默认账本备份位于 Windows 系统「文档」目录下的 `MihomoTraffic-Debug/backups/`。
+- 用 `cargo run --locked -- --data-dir ./target/debug-test-data` 可以指定独立的配置、账本和日志目录。同一 Windows 会话内，Debug 版和安装版共用单实例入口，启动前请先退出正在运行的版本。
+
 Windows CI 运行格式检查、Clippy 和默认测试。需要桌面、真实内核或特定数据的测试由各自的忽略标记说明前置条件。界面和任务栏用例可通过独立入口运行，日志位于 `target/desktop-tests`。
 
 ```powershell

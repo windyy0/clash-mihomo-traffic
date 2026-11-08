@@ -484,24 +484,51 @@ impl TrafficApp {
     }
     fn position_help(&self) -> impl IntoElement {
         let p = self.p;
-        let manual = self.config.taskbar_position_mode == TaskbarPositionMode::Manual;
+        let (summary, details) = if self.config.taskbar_position_mode == TaskbarPositionMode::Manual
+        {
+            (
+                "拖动滑块可快速定位。加减按钮或 ← / → 每次移动 1 px，按住 Shift 时每次移动 8 px。加减按钮支持长按。",
+                "也可以输入距任务栏左侧的像素数，按回车或离开输入框后生效。",
+            )
+        } else {
+            (
+                "避开任务栏上已有的图标和按钮，寻找最靠近所选位置的空位。可选择「优先靠左」或「靠近通知区」。",
+                "任务栏布局变化时会自动调整。空位不足时暂时隐藏，空位稳定后恢复。识别失败时可重新检测或切换到手动调整。",
+            )
+        };
         let mut lift = rgb(0xffffff);
         lift.a = if p.dark { 0.04 } else { 0.72 };
         let background = rgb(p.bg).blend(lift);
         Popover::new("position-help-popover")
             .no_style()
-            .trigger(InfoHelpTrigger { id: "position-help", palette: p, selected: false })
-            .content(move |window, cx| cx.new(|cx| PopoverContent::new(window, cx, move |_, cx| {
-                column().id("position-help-card").gap(px(8.)).p(px(14.)).w(px(320.))
-                    .bg(background).border_1().border_color(card_border(p))
-                    .rounded(px(10.)).shadow_sm()
-                    .when(manual, |d| d.child(label("每次1px · Shift加速至8px · 支持长按", p.text).whitespace_normal()))
-                    .child(label(if manual { "键盘 ← / → 调整，Shift 加速。数字输入回车或失焦应用。" } else { "没有足够空位时临时隐藏，空位稳定后恢复；识别失败时可使用手动调整。" }, p.muted).whitespace_normal())
-                    // no_style removes the component's outside-click handler,
-                    // so keep dismissal on this card while styling it locally.
-                    .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
-                    .into_any_element()
-            }).p_0()))
+            .trigger(InfoHelpTrigger {
+                id: "position-help",
+                palette: p,
+                selected: false,
+            })
+            .content(move |window, cx| {
+                cx.new(|cx| {
+                    PopoverContent::new(window, cx, move |_, cx| {
+                        column()
+                            .id("position-help-card")
+                            .gap(px(8.))
+                            .p(px(14.))
+                            .w(px(320.))
+                            .bg(background)
+                            .border_1()
+                            .border_color(card_border(p))
+                            .rounded(px(10.))
+                            .shadow_sm()
+                            .child(label(summary, p.text).whitespace_normal())
+                            .child(label(details, p.muted).whitespace_normal())
+                            // no_style removes the component's outside-click handler,
+                            // so keep dismissal on this card while styling it locally.
+                            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
+                            .into_any_element()
+                    })
+                    .p_0()
+                })
+            })
     }
     fn position_aux_button(
         &self,

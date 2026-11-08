@@ -67,6 +67,9 @@
 cargo run --locked
 ```
 
+Mihomo Traffic 使用 Rust 编写，桌面界面使用 GPUI。
+
+
 ## 📚 文档
 
 ### [使用与数据说明](docs/guide.md)
