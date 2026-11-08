@@ -11,8 +11,8 @@ pub use process::{
     pipe_owner, pipe_server_process, process_identity, proxy_applications, proxy_client_name,
 };
 pub use taskbar::{
-    UiEvent, adjustment_keys, apply_hotkey, request_app_exit, request_taskbar_update,
-    set_hotkey_recording, start_shell, taskbar_dpi,
+    UiEvent, adjustment_keys, apply_hotkey, request_app_exit, request_app_open,
+    request_taskbar_update, set_hotkey_recording, start_shell, taskbar_dpi,
 };
 pub use window::{
     FloatPosition, client_area_animations_enabled, dark_system, drag, fit_float, float_corners,

@@ -10,7 +10,7 @@ pub const DEFAULT: &str = "Ctrl+Alt+M";
 pub const APPLY_MESSAGE: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 5;
 const IDS: [i32; 2] = [0x4d01, 0x4d02];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Hotkey {
     modifiers: u32,
     key: u32,

@@ -177,7 +177,7 @@ fn seed(app: &mut TrafficApp, mode: usize) {
             },
         },
     ];
-    data.report = report.clone();
+    data.report = report.clone().into();
     data.report_id = app.query_id;
     app.report = report;
     app.data = data.clone();

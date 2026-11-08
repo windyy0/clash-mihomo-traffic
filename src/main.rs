@@ -47,6 +47,9 @@ mod wallpaper;
 
 fn start() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--desktop-ui") {
+        return ui::run_interface_process(args.get(2).map(String::as_str));
+    }
     if let Some(index) = args.iter().position(|a| a == "--relocate-data") {
         let path = args
             .get(index + 1)
@@ -119,7 +122,7 @@ fn start() -> anyhow::Result<()> {
             Err(anyhow::anyhow!("未能连接 Mihomo"))
         }
     } else {
-        ui::run(backend.clone())
+        ui::run_desktop(backend.clone())
     };
     let shutdown_result = backend.shutdown();
     run_result?;
@@ -135,6 +138,7 @@ fn main() {
                     | "--headless"
                     | "--probe-taskbar"
                     | "--relocate-data"
+                    | "--desktop-ui"
                     | "--migration-ready"
                     | "--purge-personal-data"
             )

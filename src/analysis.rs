@@ -16,7 +16,7 @@ const BURST_INCREASE: u128 = 5 * 1024 * 1024;
 #[path = "analysis_history.rs"]
 mod history;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AnalysisRange {
     #[default]
     FiveMinutes,
@@ -159,14 +159,14 @@ impl ComparisonBucket {
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 struct FineTimeline {
     covered: Vec<u32>,
     total: Trace,
     apps: BTreeMap<String, Trace>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AnalysisRequest {
     pub id: u64,
     pub generation: u64,
@@ -174,7 +174,7 @@ pub struct AnalysisRequest {
     pub anchor: i64,
     pub windows: Option<ComparisonWindows>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ComparisonWindows {
     pub from: i64,
     pub to: i64,
@@ -364,7 +364,7 @@ fn portion(bytes: Bytes, from: i64, to: i64, start: i64, end: i64) -> Bytes {
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Trace {
     bins: BTreeMap<usize, Bytes>,
 }
@@ -379,7 +379,7 @@ impl Trace {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Peak {
     pub time: i64,
     pub bytes: Bytes,
@@ -389,7 +389,7 @@ impl Peak {
         self.bytes.total() as f64 / 60.
     }
 }
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Metrics {
     pub current: Bytes,
     pub previous: Bytes,
@@ -401,12 +401,12 @@ impl Metrics {
         self.current.total() as i128 - self.previous.total() as i128
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppComparison {
     pub key: String,
     pub metrics: Metrics,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Burst {
     pub app: String,
     pub time: i64,
@@ -419,7 +419,7 @@ impl Burst {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub request: AnalysisRequest,
     pub generated_at: i64,

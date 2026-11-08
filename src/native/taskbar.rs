@@ -13,7 +13,6 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicIsize, Ordering},
-        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -147,7 +146,27 @@ pub fn request_app_exit() -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+pub fn request_app_open() {
+    unsafe {
+        let mut shell = SHELL_WINDOW.load(Ordering::Acquire) as HWND;
+        if shell.is_null() {
+            shell = FindWindowW(
+                wide("MihomoTrafficShell").as_ptr(),
+                wide("Mihomo Traffic Shell").as_ptr(),
+            );
+        }
+        if !shell.is_null() {
+            let mut pid = 0;
+            GetWindowThreadProcessId(shell, &mut pid);
+            if pid != 0 {
+                AllowSetForegroundWindow(pid);
+            }
+            PostMessageW(shell, WM_COMMAND, 1, 0);
+        }
+    }
+}
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum UiEvent {
     Open,
     OpenOverview,
@@ -161,7 +180,7 @@ struct ShellState {
     shared: Arc<Mutex<Shared>>,
     config: Arc<Mutex<Config>>,
     stop: Arc<AtomicBool>,
-    events: mpsc::Sender<UiEvent>,
+    events: tokio::sync::mpsc::UnboundedSender<UiEvent>,
     dock: HWND,
     parent: HWND,
     owner: HWND,
@@ -223,8 +242,8 @@ pub fn start_shell(
     shared: Arc<Mutex<Shared>>,
     config: Arc<Mutex<Config>>,
     stop: Arc<AtomicBool>,
-) -> mpsc::Receiver<UiEvent> {
-    let (tx, rx) = mpsc::channel();
+) -> tokio::sync::mpsc::UnboundedReceiver<UiEvent> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::Builder::new()
         .name("windows-shell".into())
         .spawn(move || unsafe {

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BucketSize {
     #[default]
     Hour,
@@ -70,13 +70,13 @@ fn midnight(date: NaiveDate) -> Result<i64> {
         })
         .context("无法确定本地日期起点")
 }
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Bucket {
     pub from: i64,
     pub to: i64,
     pub bytes: Bytes,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Histogram {
     pub size: BucketSize,
     pub buckets: Vec<Bucket>,

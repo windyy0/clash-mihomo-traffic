@@ -12,14 +12,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnalysisReply {
     pub request: AnalysisRequest,
     /// The worker is finished; sampling coverage may still contain genuine gaps.
     pub complete: bool,
     pub result: std::result::Result<Arc<AnalysisSnapshot>, String>,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct CalendarReply {
     pub request: CalendarRequest,
     pub result: std::result::Result<Arc<CalendarMonth>, String>,
@@ -220,7 +220,7 @@ fn start_history(handle: &Backend, qrx: mpsc::Receiver<(u64, Query)>) -> Result<
                                 .query
                                 .as_ref()
                                 .is_some_and(|query| query.differs_only_by_page(&job.1)))
-                        .then(|| state.report.clone());
+                        .then(|| state.report.as_ref().clone());
                         (revision, cached_page)
                     };
                     let page_only = cached_page.is_some();
@@ -280,10 +280,10 @@ fn start_history(handle: &Backend, qrx: mpsc::Receiver<(u64, Query)>) -> Result<
                                 report.error.is_empty().then(|| (revision, Instant::now()));
                         }
                         state.report_id = job.0;
-                        state.report = report;
+                        state.report = Arc::new(report);
                     } else {
                         state.detail_id = job.0;
-                        state.detail = report;
+                        state.detail = Arc::new(report);
                     }
                     drop(state);
                     qready.notify_one();
@@ -301,7 +301,7 @@ impl Backend {
         &self,
         report_id: Option<u64>,
         detail_id: Option<u64>,
-    ) -> (u64, Option<Report>, Option<Report>) {
+    ) -> (u64, Option<Arc<Report>>, Option<Arc<Report>>) {
         let state = self.shared.lock().unwrap();
         (
             state.storage_revision,

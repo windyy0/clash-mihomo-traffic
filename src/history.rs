@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub const MINUTE: i64 = 60_000;
 pub const DAY: i64 = 86_400_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Coverage {
     Complete,
     Partial,
@@ -14,7 +14,7 @@ pub enum Coverage {
     Future,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Grain {
     Minute,
     Hour,
@@ -22,7 +22,7 @@ pub enum Grain {
     Week,
     Months(u32),
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Bucket {
     pub from: i64,
     pub to: i64,
@@ -44,7 +44,7 @@ impl Bucket {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Trend {
     pub from: i64,
     pub to: i64,
@@ -72,7 +72,7 @@ impl Trend {
         })
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CalendarRequest {
     pub id: u64,
     pub generation: u64,
@@ -80,7 +80,7 @@ pub struct CalendarRequest {
     pub month: u32,
     pub as_of: i64,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CalendarMonth {
     pub request: CalendarRequest,
     pub days: Vec<Bucket>,

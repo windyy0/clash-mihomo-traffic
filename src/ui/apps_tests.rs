@@ -297,9 +297,9 @@ fn seed(app: &mut TrafficApp, offline: bool, empty: bool) {
             )
         })
         .collect();
-    data.report = report.clone();
+    data.report = report.clone().into();
     data.report_id = app.query_id;
-    data.detail = detail.clone();
+    data.detail = detail.clone().into();
     data.detail_id = app.detail_id;
     *app.backend.shared.lock().unwrap() = data.clone();
     app.data = data;
@@ -416,7 +416,7 @@ async fn exercise_usage_detail(
                 );
                 {
                     let mut shared = app.backend.shared.lock().unwrap();
-                    shared.detail = previous;
+                    shared.detail = previous.into();
                     shared.detail_id = id;
                 }
                 app.poll_query_results(cx);
@@ -720,7 +720,7 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
                                 )));
                             if state == 4 {
                                 app.report.query = None;
-                                app.backend.shared.lock().unwrap().report.query = None;
+                                std::sync::Arc::make_mut(&mut app.backend.shared.lock().unwrap().report).query = None;
                             }
                             if state == 1 {
                                 let key = app.report.rows[0].key.clone();
@@ -730,8 +730,8 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
                                 let child = Bytes { up: total.up / 2, down: total.down / 2 };
                                 app.detail.members = vec![Row { key: app.selected.clone(), bytes: Bytes { up: total.up - child.up, down: total.down - child.down } }, Row { key: r"C:\Program Files\Microsoft\EdgeWebView\Application\msedgewebview2.exe".into(), bytes: child }];
                                 app.act(Action::Application(ApplicationAction::ToggleApplicationProcesses), window, cx);
-                                app.data.detail = app.detail.clone();
-                                app.backend.shared.lock().unwrap().detail = app.detail.clone();
+                                app.data.detail = app.detail.clone().into();
+                                app.backend.shared.lock().unwrap().detail = app.data.detail.clone();
                             }
                             app.page_scroll.set_offset(point(px(0.), px(0.)));
                             cx.notify();
@@ -1963,9 +1963,9 @@ request,
                                 app.history_state.month_retry = None;
                             }
                             let mut shared = app.backend.shared.lock().unwrap();
-                            shared.report.query = Some(app.query.clone());
+                            std::sync::Arc::make_mut(&mut shared.report).query = Some(app.query.clone());
                             shared.report_id = app.query_id;
-                            shared.detail.query = Some(Query {
+                            std::sync::Arc::make_mut(&mut shared.detail).query = Some(Query {
                                 app: app.selected.clone(),
                                 dimension: app.detail_dimension.into(),
                                 sort: TrafficSort::Total,
@@ -1974,8 +1974,8 @@ request,
                                 ..app.query.clone()
                             });
                             shared.detail_id = app.detail_id;
-                            app.report = shared.report.clone();
-                            app.detail = shared.detail.clone();
+                            app.report = shared.report.as_ref().clone();
+                            app.detail = shared.detail.as_ref().clone();
                             app.data = shared.clone();
                             cx.notify();
                         })?;

@@ -154,7 +154,7 @@ impl TrafficApp {
             }
             OverviewAction::CloseHover => self.dismiss_overview_hover(window.mouse_position(), cx),
             OverviewAction::RangeHistory(bin) => self.open_overview_range(bin, None, window, cx),
-            OverviewAction::RefreshSubscriptions => self.backend.subscriptions.refresh(),
+            OverviewAction::RefreshSubscriptions => self.backend.refresh_subscriptions(),
             OverviewAction::ExitPage(ip) => self.show_overview_exit(ip),
             OverviewAction::ExitPause => self.toggle_overview_exit_rotation(),
             OverviewAction::ExitDetect => self.detect_overview_exit(cx),

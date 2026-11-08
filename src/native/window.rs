@@ -36,11 +36,7 @@ pub fn single_instance() -> Result<Option<Instance>> {
         anyhow::ensure!(!h.is_null(), "无法创建单实例锁");
         if GetLastError() == ERROR_ALREADY_EXISTS {
             CloseHandle(h);
-            let main = FindWindowW(null(), wide("Mihomo Traffic").as_ptr());
-            if !main.is_null() {
-                show(main as isize, true);
-                SetForegroundWindow(main);
-            }
+            super::taskbar::request_app_open();
             return Ok(None);
         }
         Ok(Some(Instance(h)))

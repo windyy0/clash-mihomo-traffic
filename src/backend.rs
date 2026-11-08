@@ -23,6 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Command {
     Reconnect,
     Backup,
@@ -178,8 +179,19 @@ impl Backend {
     pub fn snapshot(&self) -> Shared {
         self.shared.lock().unwrap().clone()
     }
-    pub fn storage_revision(&self) -> u64 {
-        self.shared.lock().unwrap().storage_revision
+    pub fn clear_interface_results(&self) {
+        {
+            let mut state = self.shared.lock().unwrap();
+            state.report = Default::default();
+            state.report_id = 0;
+            state.detail = Default::default();
+            state.detail_id = 0;
+        }
+        self.analysis_result.lock().unwrap().take();
+        self.calendar_result.lock().unwrap().take();
+        self.speeds.reply.lock().unwrap().take();
+        self.speeds.hover_reply.lock().unwrap().take();
+        self.overview_usage.reply.lock().unwrap().take();
     }
     pub fn notice(&self, msg: impl Into<String>) {
         self.shared.lock().unwrap().notice = msg.into();

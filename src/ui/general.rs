@@ -284,7 +284,7 @@ impl TrafficApp {
                         let selected = self.settings_section == section;
                         self.button(
                             format!("settings-section-{}", section.id()),
-                            if section == SettingsSection::About && self.updates.has_unread() {
+                            if section == SettingsSection::About && self.updates.has_unread(cx) {
                                 "关于 · 新版"
                             } else {
                                 section.label()
@@ -399,7 +399,7 @@ impl TrafficApp {
         self.hotkey_focus.focus(window);
         self.hotkey_recording = true;
         self.open_hotkey_error.clear();
-        native::set_hotkey_recording(true);
+        self.backend.set_hotkey_recording(true);
         cx.notify();
     }
 
@@ -407,7 +407,7 @@ impl TrafficApp {
         if self.hotkey_recording {
             self.hotkey_recording = false;
             self.open_hotkey_error.clear();
-            native::set_hotkey_recording(false);
+            self.backend.set_hotkey_recording(false);
             cx.notify();
         }
     }
@@ -480,7 +480,7 @@ impl TrafficApp {
         match result {
             Ok(key) => {
                 self.hotkey_request = self.hotkey_request.wrapping_add(1);
-                match native::apply_hotkey(self.hotkey_request, key) {
+                match self.backend.apply_hotkey(self.hotkey_request, key) {
                     Ok(()) => {
                         self.hotkey_pending = Some((self.hotkey_request, key));
                         self.open_hotkey_error.clear();

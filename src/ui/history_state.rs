@@ -1060,7 +1060,9 @@ impl TrafficApp {
             self.history_state.cache.clear();
             self.history_state.month_pending = None;
         }
-        if let Some(reply) = self.backend.calendar_result()
+        if let Some(reply) = self
+            .backend
+            .calendar_result(self.history_state.month_pending.as_ref())
             && self.history_state.month_pending.as_ref() == Some(&reply.request)
         {
             self.history_state.month_pending = None;

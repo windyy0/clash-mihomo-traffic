@@ -143,13 +143,13 @@ pub fn speed(v: f64) -> String {
     format!("{}/s", human_bytes(v.max(0.) as u64))
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SeriesPoint {
     pub time: i64,
     pub up: f64,
     pub down: f64,
 }
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LiveSample {
     pub from: i64,
     pub to: i64,
@@ -157,12 +157,12 @@ pub struct LiveSample {
     pub down: f64,
     pub valid: bool,
 }
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     pub key: String,
     pub bytes: Bytes,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TrafficSort {
     #[default]
     Total,
@@ -181,7 +181,7 @@ impl TrafficSort {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Query {
     pub history: bool,
     pub history_context: Option<(i64, i64)>,
@@ -230,7 +230,7 @@ impl Query {
                 }
     }
 }
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub row_speeds: std::collections::HashMap<String, crate::speed_stats::SpeedStats>,
     pub speeds: crate::speed_stats::SpeedStats,
@@ -256,14 +256,14 @@ pub struct Report {
     pub archive_daily: bool,
     pub error: String,
 }
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Gap {
     pub from: i64,
     pub to: i64,
     pub bytes: Bytes,
     pub reason: String,
 }
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct TaskbarGeometry {
     pub ready: bool,
     pub x: i32,
@@ -272,7 +272,7 @@ pub struct TaskbarGeometry {
     pub widget_width: i32,
     pub margin: i32,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProcessControlStatus {
     #[default]
     Idle,
@@ -283,7 +283,7 @@ pub enum ProcessControlStatus {
     Failed,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Shared {
     pub subscriptions: crate::subscriptions::View,
     pub seconds_status: crate::speed_stats::SecondsStatus,
@@ -310,9 +310,13 @@ pub struct Shared {
     pub connections: Arc<Vec<Connection>>,
     pub live: VecDeque<LiveSample>,
     pub app_rates: std::collections::HashMap<String, Bytes>,
-    pub report: Report,
+    #[serde(skip)]
+    pub report: Arc<Report>,
+    #[serde(skip)]
     pub report_id: u64,
-    pub detail: Report,
+    #[serde(skip)]
+    pub detail: Arc<Report>,
+    #[serde(skip)]
     pub detail_id: u64,
     pub taskbar_status: String,
     pub open_hotkey_active: String,
@@ -353,9 +357,9 @@ impl Default for Shared {
             connections: Default::default(),
             live: VecDeque::new(),
             app_rates: Default::default(),
-            report: Report::default(),
+            report: Default::default(),
             report_id: 0,
-            detail: Report::default(),
+            detail: Default::default(),
             detail_id: 0,
             taskbar_status: "未启用".into(),
             open_hotkey_active: String::new(),
@@ -371,7 +375,7 @@ impl Default for Shared {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SystemMetrics {
     pub cpu_percent: Option<f64>,
     /// Used and total physical memory available to Windows, in bytes.
@@ -380,7 +384,7 @@ pub struct SystemMetrics {
     pub disks: Vec<DiskMetrics>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct GpuMetrics {
     /// PCI adapter identity and enumeration index, independent of reboot LUIDs.
     pub id: String,
@@ -390,7 +394,7 @@ pub struct GpuMetrics {
     pub shared_memory: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiskMetrics {
     pub id: String,
     pub name: String,

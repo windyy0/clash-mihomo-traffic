@@ -1,4 +1,4 @@
-use crate::{backend::Backend, mihomo::Client};
+use crate::{mihomo::Client, ui::UiBackend};
 use serde::Deserialize;
 use std::{net::IpAddr, sync::atomic::Ordering, time::Duration};
 
@@ -11,7 +11,7 @@ pub struct Source {
 }
 
 impl Source {
-    pub fn current(backend: &Backend) -> Option<Self> {
+    pub fn current(backend: &UiBackend) -> Option<Self> {
         let shared = backend.shared.lock().unwrap();
         if !shared.connected || !shared.core_verified || shared.core_identity.is_empty() {
             return None;
@@ -270,7 +270,7 @@ async fn probe(
 }
 
 pub fn detect(
-    backend: &Backend,
+    backend: &UiBackend,
     source: &Source,
     mut publish: impl FnMut(Family, Option<Detection>),
 ) -> Result<(), &'static str> {

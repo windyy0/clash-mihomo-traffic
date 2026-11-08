@@ -15,7 +15,7 @@ pub(super) enum UpdateAction {
     Download,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Fetch {
     Idle,
     Pending,
@@ -28,11 +28,37 @@ enum Notice<'a> {
     Failed(CheckError),
 }
 
-pub(super) struct State {
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) enum CheckAction {
+    Check,
+    Dismiss,
+    Seen,
+    Frequency(CheckFrequency),
+    History { force: bool },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct CheckSnapshot {
     cache: Cache,
     latest: Fetch,
     manual_feedback: bool,
     history: Fetch,
+    revision: u64,
+}
+
+pub(super) struct ReleaseChecks {
+    dir: std::path::PathBuf,
+    cache: Cache,
+    latest: Fetch,
+    pending_latest: Option<std::sync::mpsc::Receiver<Result<Release, CheckError>>>,
+    manual_feedback: bool,
+    history: Fetch,
+    pending_history: Option<std::sync::mpsc::Receiver<Result<Vec<Release>, CheckError>>>,
+    revision: u64,
+}
+
+pub(super) struct State {
+    checks: Entity<ReleaseChecks>,
     notes_open: bool,
     notes_opener: FocusHandle,
     notes_controls: [FocusHandle; 4],
@@ -41,13 +67,9 @@ pub(super) struct State {
 }
 
 impl State {
-    pub(super) fn new(dir: &std::path::Path, cx: &mut App) -> Self {
-        let cache = Cache::load(dir);
+    pub(super) fn new(checks: Entity<ReleaseChecks>, cx: &mut App) -> Self {
         Self {
-            latest: cache.last_error.map_or(Fetch::Idle, Fetch::Failed),
-            cache,
-            manual_feedback: false,
-            history: Fetch::Idle,
+            checks,
             notes_open: false,
             notes_opener: cx.focus_handle(),
             notes_controls: std::array::from_fn(|_| cx.focus_handle()),
@@ -56,21 +78,19 @@ impl State {
         }
     }
 
-    pub(super) fn has_unread(&self) -> bool {
-        self.cache.unread_update().is_some()
+    pub(super) fn has_unread(&self, cx: &App) -> bool {
+        self.checks.read(cx).cache.unread_update().is_some()
     }
 
-    fn newer_release(&self) -> Option<&Release> {
-        self.cache
-            .latest
-            .as_ref()
-            .filter(|release| release.is_newer())
+    fn download_url(&self, cx: &App) -> Option<String> {
+        self.checks
+            .read(cx)
+            .newer_release()?
+            .download_url(self.portable)
     }
+}
 
-    fn download_url(&self) -> Option<String> {
-        self.newer_release()?.download_url(self.portable)
-    }
-
+impl ReleaseChecks {
     fn notice(&self) -> Option<Notice<'_>> {
         match self.latest {
             Fetch::Pending => None,
@@ -100,9 +120,118 @@ impl State {
             false
         }
     }
+    pub(super) fn new(dir: std::path::PathBuf) -> Self {
+        let mut checks = Self::mirror(dir);
+        checks.cache = Cache::load(&checks.dir);
+        checks.latest = checks.cache.last_error.map_or(Fetch::Idle, Fetch::Failed);
+        checks.revision = 1;
+        checks
+    }
 
-    fn store(&self, dir: &std::path::Path) {
-        if let Err(error) = self.cache.save(dir) {
+    pub(super) fn mirror(dir: std::path::PathBuf) -> Self {
+        Self {
+            dir,
+            cache: Cache::default(),
+            latest: Fetch::Idle,
+            pending_latest: None,
+            manual_feedback: false,
+            history: Fetch::Idle,
+            pending_history: None,
+            revision: 0,
+        }
+    }
+
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(super) fn tick(&mut self, frequency: Option<CheckFrequency>) -> bool {
+        let latest = self.poll_latest();
+        let history = self.poll_history();
+        let started = frequency.is_some_and(|frequency| self.check_if_due(frequency));
+        let changed = latest || history || started;
+        if changed {
+            self.revision += 1;
+        }
+        changed
+    }
+
+    pub(super) fn request(&mut self, action: CheckAction, known: u64) -> Option<CheckSnapshot> {
+        self.perform(action);
+        self.snapshot(known)
+    }
+
+    pub(super) fn snapshot(&self, known: u64) -> Option<CheckSnapshot> {
+        (self.revision != known).then(|| CheckSnapshot {
+            cache: self.cache.clone(),
+            latest: self.latest,
+            manual_feedback: self.manual_feedback,
+            history: self.history,
+            revision: self.revision,
+        })
+    }
+
+    fn perform(&mut self, action: CheckAction) -> bool {
+        let changed = match action {
+            CheckAction::Check => self.check_latest(true),
+            CheckAction::Dismiss => {
+                let manual = self.manual_feedback;
+                let changed = self.dismiss_notice();
+                if changed {
+                    self.store();
+                }
+                changed || manual
+            }
+            CheckAction::Seen => {
+                let changed = self.mark_seen();
+                if changed {
+                    self.store();
+                }
+                changed
+            }
+            CheckAction::Frequency(frequency) => self.check_if_due(frequency),
+            CheckAction::History { force } => {
+                (force || self.cache.history.is_none() && matches!(self.history, Fetch::Idle))
+                    && self.refresh_history()
+            }
+        };
+        if changed {
+            self.revision += 1;
+        }
+        changed
+    }
+
+    pub(super) fn sync(&mut self, backend: &UiBackend, action: CheckAction) -> bool {
+        if !backend.is_remote() {
+            return self.perform(action);
+        }
+        let Some(snapshot) = backend.check_updates(action, self.revision) else {
+            return false;
+        };
+        self.apply_snapshot(snapshot)
+    }
+
+    pub(super) fn apply_snapshot(&mut self, snapshot: CheckSnapshot) -> bool {
+        if snapshot.revision <= self.revision {
+            return false;
+        }
+        self.cache = snapshot.cache;
+        self.latest = snapshot.latest;
+        self.manual_feedback = snapshot.manual_feedback;
+        self.history = snapshot.history;
+        self.revision = snapshot.revision;
+        true
+    }
+
+    fn newer_release(&self) -> Option<&Release> {
+        self.cache
+            .latest
+            .as_ref()
+            .filter(|release| release.is_newer())
+    }
+
+    fn store(&self) {
+        if let Err(error) = self.cache.save(&self.dir) {
             tracing::warn!(%error, "Unable to cache the release check");
         }
     }
@@ -115,96 +244,128 @@ impl State {
             false
         }
     }
+    pub(super) fn check_if_due(&mut self, frequency: CheckFrequency) -> bool {
+        frequency.is_due(
+            Local::now(),
+            self.cache
+                .last_attempt
+                .map(|time| time.with_timezone(&Local)),
+        ) && self.check_latest(false)
+    }
+
+    fn check_latest(&mut self, manual: bool) -> bool {
+        if matches!(self.latest, Fetch::Pending) {
+            return false;
+        }
+        self.manual_feedback = manual;
+        self.cache.last_attempt = Some(Utc::now());
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("release-check".into())
+            .spawn(move || {
+                let _ = send.send(release_update::fetch_latest());
+            }) {
+            Ok(_) => {
+                self.pending_latest = Some(receive);
+                self.latest = Fetch::Pending;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Unable to start the release check");
+                self.cache.last_error = Some(CheckError::Network);
+                self.latest = Fetch::Failed(CheckError::Network);
+            }
+        }
+        self.store();
+        true
+    }
+
+    pub(super) fn poll_latest(&mut self) -> bool {
+        let Some(receive) = &self.pending_latest else {
+            return false;
+        };
+        let result = match receive.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(CheckError::Network),
+        };
+        self.pending_latest = None;
+        self.cache.last_error = result.as_ref().err().copied();
+        self.latest = match result {
+            Ok(release) => {
+                self.cache.last_success = Some(Utc::now());
+                let previous = self.cache.latest.replace(release);
+                if self.cache.current.is_none() {
+                    self.cache.current = previous.filter(Release::matches_current);
+                }
+                Fetch::Idle
+            }
+            Err(error) => Fetch::Failed(error),
+        };
+        self.store();
+        true
+    }
+
+    fn refresh_history(&mut self) -> bool {
+        if matches!(self.history, Fetch::Pending) {
+            return false;
+        }
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("release-history".into())
+            .spawn(move || {
+                let _ = send.send(release_update::fetch_history());
+            }) {
+            Ok(_) => {
+                self.pending_history = Some(receive);
+                self.history = Fetch::Pending;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Unable to start the release history check");
+                self.history = Fetch::Failed(CheckError::Network);
+            }
+        }
+        true
+    }
+
+    fn poll_history(&mut self) -> bool {
+        let Some(receive) = &self.pending_history else {
+            return false;
+        };
+        let result = match receive.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(CheckError::Network),
+        };
+        self.pending_history = None;
+        self.history = match result {
+            Ok(releases) => {
+                self.cache.history = Some(releases);
+                self.store();
+                Fetch::Idle
+            }
+            Err(error) => Fetch::Failed(error),
+        };
+        true
+    }
 }
 
 impl TrafficApp {
-    pub(super) fn poll_update_schedule(&mut self, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn mark_update_seen(&self, window: &Window, cx: &mut Context<Self>) {
         if self.page == Page::Settings
             && self.settings_section == SettingsSection::About
             && window.is_window_active()
-            && self.updates.mark_seen()
+            && self.updates.checks.read(cx).cache.unread_update().is_some()
         {
-            self.updates.store(&self.backend.dir);
-            cx.notify();
-        }
-        if self.tick == 1 || self.tick.is_multiple_of(10) {
-            self.check_update_if_due(cx);
+            self.apply_check_action(CheckAction::Seen, cx);
         }
     }
 
-    fn check_update_if_due(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.updates.latest, Fetch::Pending)
-            && self.config.update_check_frequency.is_due(
-                Local::now(),
-                self.updates
-                    .cache
-                    .last_attempt
-                    .map(|time| time.with_timezone(&Local)),
-            )
-        {
-            self.check_update(false, cx);
-        }
-    }
-
-    fn check_update(&mut self, manual: bool, cx: &mut Context<Self>) {
-        if matches!(self.updates.latest, Fetch::Pending) {
-            return;
-        }
-        self.updates.manual_feedback = manual;
-        self.updates.latest = Fetch::Pending;
-        self.updates.cache.last_attempt = Some(Utc::now());
-        self.updates.store(&self.backend.dir);
-        let fetch = cx
-            .background_executor()
-            .spawn(async { release_update::fetch_latest() });
-        cx.spawn(async move |this, cx| {
-            let result = fetch.await;
-            let _ = this.update(cx, |app, cx| {
-                let cache = &mut app.updates.cache;
-                cache.last_error = result.as_ref().err().copied();
-                app.updates.latest = match result {
-                    Ok(release) => {
-                        cache.last_success = Some(Utc::now());
-                        let previous = cache.latest.replace(release);
-                        if cache.current.is_none() {
-                            cache.current = previous.filter(Release::matches_current);
-                        }
-                        Fetch::Idle
-                    }
-                    Err(error) => Fetch::Failed(error),
-                };
-                app.updates.store(&app.backend.dir);
+    fn apply_check_action(&self, action: CheckAction, cx: &mut Context<Self>) {
+        self.updates.checks.update(cx, |checks, cx| {
+            if checks.sync(&self.backend, action) {
                 cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn refresh_update_history(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.updates.history, Fetch::Pending) {
-            return;
-        }
-        self.updates.history = Fetch::Pending;
-        let fetch = cx
-            .background_executor()
-            .spawn(async { release_update::fetch_history() });
-        cx.spawn(async move |this, cx| {
-            let result = fetch.await;
-            let _ = this.update(cx, |app, cx| {
-                app.updates.history = match result {
-                    Ok(releases) => {
-                        app.updates.cache.history = Some(releases);
-                        app.updates.store(&app.backend.dir);
-                        Fetch::Idle
-                    }
-                    Err(error) => Fetch::Failed(error),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+            }
+        });
     }
 
     pub(super) fn update_notes_is_open(&self) -> bool {
@@ -222,40 +383,38 @@ impl TrafficApp {
         cx: &mut Context<Self>,
     ) {
         match action {
-            UpdateAction::Check => self.check_update(true, cx),
+            UpdateAction::Check => self.apply_check_action(CheckAction::Check, cx),
             UpdateAction::DismissNotice => {
-                if self.updates.dismiss_notice() {
-                    self.updates.store(&self.backend.dir);
-                }
+                self.apply_check_action(CheckAction::Dismiss, cx);
                 self.updates.notes_opener.focus(window);
             }
             UpdateAction::Frequency(frequency) => {
                 if self.config.update_check_frequency != frequency {
                     self.config.update_check_frequency = frequency;
                     self.save_config();
-                    self.check_update_if_due(cx);
+                    self.apply_check_action(CheckAction::Frequency(frequency), cx);
                 }
             }
             UpdateAction::OpenNotes => {
                 self.updates.notes_open = true;
                 self.updates.notes_scroll.set_offset(Point::default());
-                if self.updates.cache.history.is_none()
-                    && matches!(self.updates.history, Fetch::Idle)
-                {
-                    self.refresh_update_history(cx);
-                }
+                self.apply_check_action(CheckAction::History { force: false }, cx);
                 self.updates.notes_controls[0].focus(window);
             }
             UpdateAction::CloseNotes => {
                 self.dismiss_update_notes();
                 self.updates.notes_opener.focus(window);
             }
-            UpdateAction::RefreshNotes => self.refresh_update_history(cx),
+            UpdateAction::RefreshNotes => {
+                self.apply_check_action(CheckAction::History { force: true }, cx);
+            }
             UpdateAction::OpenReleasePage => {
                 let url = self
                     .updates
+                    .checks
+                    .read(cx)
                     .newer_release()
-                    .filter(|_| self.updates.download_url().is_none())
+                    .filter(|_| self.updates.download_url(cx).is_none())
                     .map_or_else(
                         || release_update::RELEASES_PAGE.to_string(),
                         release_update::Release::page_url,
@@ -263,20 +422,20 @@ impl TrafficApp {
                 cx.open_url(&url);
             }
             UpdateAction::Download => {
-                if let Some(url) = self.updates.download_url() {
+                if let Some(url) = self.updates.download_url(cx) {
                     cx.open_url(&url);
                 }
             }
         }
     }
 
-    fn update_note_actions(&self) -> [Option<UpdateAction>; 4] {
+    fn update_note_actions(&self, cx: &App) -> [Option<UpdateAction>; 4] {
         [
             Some(UpdateAction::CloseNotes),
             Some(UpdateAction::RefreshNotes),
             Some(UpdateAction::OpenReleasePage),
             self.updates
-                .download_url()
+                .download_url(cx)
                 .is_some()
                 .then_some(UpdateAction::Download),
         ]
@@ -296,7 +455,7 @@ impl TrafficApp {
             "escape" => self.act(Action::Update(UpdateAction::CloseNotes), window, cx),
             "tab" => {
                 let visible: Vec<_> = self
-                    .update_note_actions()
+                    .update_note_actions(cx)
                     .iter()
                     .zip(&self.updates.notes_controls)
                     .filter_map(|(action, handle)| action.map(|_| handle))
@@ -327,7 +486,8 @@ impl TrafficApp {
 
     pub(super) fn update_header_actions(&self, cx: &Context<Self>) -> Div {
         let p = self.p;
-        let checking = matches!(self.updates.latest, Fetch::Pending);
+        let checks = self.updates.checks.read(cx);
+        let checking = matches!(checks.latest, Fetch::Pending);
         let check = Button::new("about-check-update")
             .label(if checking {
                 "正在检查…"
@@ -358,7 +518,7 @@ impl TrafficApp {
             .on_click(cx.listener(|app, _, window, cx| {
                 app.act(Action::Update(UpdateAction::OpenNotes), window, cx);
             }));
-        let notice = self.updates.notice().map(|notice| {
+        let notice = checks.notice().map(|notice| {
             let (text, color) = match notice {
                 Notice::Update(release) => (format!("发现新版本 {}", release.tag()), p.accent_text),
                 Notice::Result(text) => (text.to_string(), p.muted),
@@ -421,7 +581,7 @@ impl TrafficApp {
             return None;
         }
         let p = self.p;
-        let actions = self.update_note_actions();
+        let actions = self.update_note_actions(cx);
         let button =
             |index: usize, id: &'static str, title: &'static str, active, cx: &Context<Self>| {
                 actions[index].map(|action| {
@@ -430,51 +590,61 @@ impl TrafficApp {
                         .focus(move |d| d.bg(state_surface(p)))
                 })
             };
-        let releases: Vec<_> = state.cache.releases().collect();
-        let message = match state.history {
+        let checks = state.checks.read(cx);
+        let releases: Vec<_> = checks
+            .cache
+            .releases()
+            .map(|release| {
+                (
+                    release.tag().to_string(),
+                    release.matches_current(),
+                    release.notes_html().to_string(),
+                )
+            })
+            .collect();
+        let message = match checks.history {
             Fetch::Pending => Some("正在获取发行记录…"),
             Fetch::Failed(error) => Some(error.message()),
             Fetch::Idle if releases.is_empty() => Some("暂无更新说明。"),
             Fetch::Idle => None,
         };
-        let body = column()
-            .gap(px(16.))
-            .min_w_0()
-            .when_some(message, |d, message| {
-                d.child(label(message, p.muted).whitespace_normal())
-            })
-            .children(releases.into_iter().enumerate().map(|(index, release)| {
-                let notes = release.notes_html();
-                column()
-                    .min_w_0()
-                    .gap(px(8.))
-                    .when(index != 0, |d| d.child(settings_separator(p)))
-                    .child(
-                        row()
+        let body =
+            column()
+                .gap(px(16.))
+                .min_w_0()
+                .when_some(message, |d, message| {
+                    d.child(label(message, p.muted).whitespace_normal())
+                })
+                .children(releases.into_iter().enumerate().map(
+                    |(index, (tag, current, notes))| {
+                        column()
+                            .min_w_0()
                             .gap(px(8.))
-                            .child(heading(release.tag().to_string(), p))
-                            .when(release.matches_current(), |d| {
-                                d.child(label("当前版本", p.muted).text_size(px(12.)))
-                            }),
-                    )
-                    .when(notes.trim().is_empty(), |d| {
-                        d.child(label("该版本暂无更新说明。", p.muted))
-                    })
-                    .when(!notes.trim().is_empty(), |d| {
-                        d.child(
-                            TextView::html(
-                                SharedString::from(format!(
-                                    "about-release-notes-{}",
-                                    release.tag()
-                                )),
-                                notes.to_string(),
-                                window,
-                                cx,
+                            .when(index != 0, |d| d.child(settings_separator(p)))
+                            .child(
+                                row()
+                                    .gap(px(8.))
+                                    .child(heading(tag.clone(), p))
+                                    .when(current, |d| {
+                                        d.child(label("当前版本", p.muted).text_size(px(12.)))
+                                    }),
                             )
-                            .text_color(rgb(p.text)),
-                        )
-                    })
-            }));
+                            .when(notes.trim().is_empty(), |d| {
+                                d.child(label("该版本暂无更新说明。", p.muted))
+                            })
+                            .when(!notes.trim().is_empty(), |d| {
+                                d.child(
+                                    TextView::html(
+                                        SharedString::from(format!("about-release-notes-{}", tag)),
+                                        notes,
+                                        window,
+                                        cx,
+                                    )
+                                    .text_color(rgb(p.text)),
+                                )
+                            })
+                    },
+                ));
         let viewport = window.viewport_size();
         Some(
             div()
@@ -546,66 +716,79 @@ impl TrafficApp {
         self.handle_update_action(UpdateAction::Frequency(CheckFrequency::Monthly), window, cx);
         anyhow::ensure!(
             self.config.update_check_frequency == CheckFrequency::Monthly
-                && !matches!(self.updates.latest, Fetch::Pending),
+                && !matches!(self.updates.checks.read(cx).latest, Fetch::Pending),
             "frequency setting did not respect the latest check"
         );
         self.handle_update_action(UpdateAction::Frequency(CheckFrequency::Never), window, cx);
         let state = &mut self.updates;
-        let latest = state.cache.latest.take();
-        anyhow::ensure!(
-            state.notice().is_none(),
-            "an unchecked version showed a notice"
-        );
-        state.manual_feedback = true;
-        state.latest = Fetch::Pending;
-        anyhow::ensure!(
-            state.notice().is_none(),
-            "pending check retained a result notice"
-        );
-        state.latest = Fetch::Idle;
-        state.cache.latest = state.cache.current.take();
-        anyhow::ensure!(
-            matches!(state.notice(), Some(Notice::Result("已是最新版")))
-                && state.download_url().is_none(),
-            "current release incorrectly offered a download"
-        );
-        state.cache.current = state.cache.latest.take();
-        state.cache.latest = latest;
-        anyhow::ensure!(
-            matches!(state.notice(), Some(Notice::Update(_))),
-            "new version was not surfaced"
-        );
-        state.latest = Fetch::Failed(CheckError::Network);
-        anyhow::ensure!(
-            matches!(state.notice(), Some(Notice::Failed(CheckError::Network))),
-            "cached result was not distinguished from a failed check"
-        );
-        state.latest = Fetch::Idle;
-        anyhow::ensure!(
-            state.dismiss_notice() && state.notice().is_none() && !state.has_unread(),
-            "dismissed update remained visible"
-        );
-        state.cache.dismissed_tag = None;
-        let portable = state.portable;
-        for (mode, suffix) in [(false, "-setup.exe"), (true, "-portable.zip")] {
-            state.portable = mode;
-            anyhow::ensure!(
-                state
-                    .download_url()
-                    .is_some_and(|url| url.ends_with(suffix)),
-                "download did not match the package mode"
-            );
-        }
-        state.portable = portable;
+        state
+            .checks
+            .clone()
+            .update(cx, |checks, _| -> anyhow::Result<()> {
+                let latest = checks.cache.latest.take();
+                anyhow::ensure!(
+                    checks.notice().is_none(),
+                    "an unchecked version showed a notice"
+                );
+                checks.manual_feedback = true;
+                checks.latest = Fetch::Pending;
+                anyhow::ensure!(
+                    checks.notice().is_none(),
+                    "pending check retained a result notice"
+                );
+                checks.latest = Fetch::Idle;
+                checks.cache.latest = checks.cache.current.take();
+                anyhow::ensure!(
+                    matches!(checks.notice(), Some(Notice::Result("已是最新版")))
+                        && checks
+                            .newer_release()
+                            .and_then(|release| release.download_url(state.portable))
+                            .is_none(),
+                    "current release incorrectly offered a download"
+                );
+                checks.cache.current = checks.cache.latest.take();
+                checks.cache.latest = latest;
+                anyhow::ensure!(
+                    matches!(checks.notice(), Some(Notice::Update(_))),
+                    "new version was not surfaced"
+                );
+                checks.latest = Fetch::Failed(CheckError::Network);
+                anyhow::ensure!(
+                    matches!(checks.notice(), Some(Notice::Failed(CheckError::Network))),
+                    "cached result was not distinguished from a failed check"
+                );
+                checks.latest = Fetch::Idle;
+                anyhow::ensure!(
+                    checks.dismiss_notice()
+                        && checks.notice().is_none()
+                        && checks.cache.unread_update().is_none(),
+                    "dismissed update remained visible"
+                );
+                checks.cache.dismissed_tag = None;
+                let portable = state.portable;
+                for (mode, suffix) in [(false, "-setup.exe"), (true, "-portable.zip")] {
+                    state.portable = mode;
+                    anyhow::ensure!(
+                        checks
+                            .newer_release()
+                            .and_then(|release| release.download_url(state.portable))
+                            .is_some_and(|url| url.ends_with(suffix)),
+                        "download did not match the package mode"
+                    );
+                }
+                state.portable = portable;
+                Ok(())
+            })?;
         self.handle_update_action(UpdateAction::OpenNotes, window, cx);
         anyhow::ensure!(
-            self.updates.notes_open && self.update_note_actions()[3].is_some(),
+            self.updates.notes_open && self.update_note_actions(cx)[3].is_some(),
             "new release did not offer latest notes and a download"
         );
+        let checks = self.updates.checks.read(cx);
         anyhow::ensure!(
-            self.updates.cache.releases().any(Release::matches_current)
-                && self.updates.cache.releases().count() == 3
-                && matches!(self.updates.history, Fetch::Idle),
+            checks.cache.releases().any(Release::matches_current)
+                && checks.cache.releases().count() == 3
+                && matches!(checks.history, Fetch::Idle),
             "cached history or current notes were not available offline"
         );
         self.handle_update_action(UpdateAction::CloseNotes, window, cx);

@@ -1,7 +1,7 @@
 use super::*;
 
 /// Frozen aggregates only: raw application minutes never escape the read worker.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Aggregate {
     metrics: Metrics,
     buckets: BTreeMap<i64, Vec<[Bytes; 2]>>,
@@ -50,7 +50,7 @@ impl Aggregate {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct HistoricalSnapshot {
     pub coverage: [i64; 2],
     total: Aggregate,

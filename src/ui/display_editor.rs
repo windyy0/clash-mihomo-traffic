@@ -414,7 +414,7 @@ impl TrafficApp {
                 self.sync_position_controls(window, cx);
                 self.taskbar_position.focus.focus(window);
             }
-            DisplayAction::TaskbarRescan => native::request_taskbar_update(true),
+            DisplayAction::TaskbarRescan => self.backend.taskbar_rescan(),
             DisplayAction::TaskbarSelect(metric) => {
                 if self.editor.selected == Some(metric) {
                     self.editor.selected = None;
@@ -646,6 +646,9 @@ impl TrafficApp {
         let palette = self.floating_palette();
         self.float_view.update(cx, |view, cx| {
             view.palette = palette;
+            if !self.config.floating {
+                view.clear_appearance();
+            }
             cx.notify();
         });
     }

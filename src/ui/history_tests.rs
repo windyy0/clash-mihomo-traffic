@@ -1254,7 +1254,7 @@ async fn exercise_compact_card_layout(
                 trend.generated_at = bucket.from;
             }
             app.report.history = Some(std::sync::Arc::new(trend));
-            app.backend.shared.lock().unwrap().report = app.report.clone();
+            app.backend.shared.lock().unwrap().report = app.report.clone().into();
             app.received_report_id = app.query_id;
             app.history_state.chart_hover = None;
             app.pin_history_chart(0, cx);
@@ -1340,7 +1340,7 @@ async fn exercise_compact_card_layout(
         );
         app.report.history = Some(original);
         app.history_state.record_period = period;
-        app.backend.shared.lock().unwrap().report = app.report.clone();
+        app.backend.shared.lock().unwrap().report = app.report.clone().into();
         app.history_state.chart_hover = None;
         cx.notify();
         Ok(())

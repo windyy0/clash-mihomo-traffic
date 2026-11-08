@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Subscription {
     pub id: String,
     pub name: String,
@@ -32,7 +32,7 @@ impl Subscription {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct View {
     pub scope: String,
     pub items: Vec<Subscription>,

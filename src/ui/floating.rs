@@ -104,8 +104,7 @@ fn natural_size(frame: &ContentFrame, gap: f32) -> (f32, f32) {
 }
 
 pub struct Floating {
-    backend: Backend,
-    main: std::sync::Arc<std::sync::atomic::AtomicIsize>,
+    backend: UiBackend,
     pub(super) palette: Palette,
     measure: ContentMeasure,
     pub(super) scroll: ScrollHandle,
@@ -117,7 +116,7 @@ pub struct Floating {
     horizontal: ScrollbarState,
 }
 impl Floating {
-    pub fn new(backend: Backend, main: std::sync::Arc<std::sync::atomic::AtomicIsize>) -> Self {
+    pub fn new(backend: UiBackend) -> Self {
         let config = backend.config_snapshot();
         let palette = Palette::new(
             config.color_theme,
@@ -125,7 +124,6 @@ impl Floating {
         );
         Self {
             backend,
-            main,
             palette,
             measure: Default::default(),
             scroll: ScrollHandle::new(),
@@ -149,6 +147,12 @@ impl Floating {
         self.initial_position = Some(native::FloatPosition::Default);
     }
 
+    pub(super) fn clear_appearance(&mut self) {
+        self.appearance = None;
+        self.backdrop = None;
+        self.mica_active = false;
+    }
+
     #[cfg(test)]
     pub(super) fn test_mica_source(&self, color: u32, dark: bool) -> anyhow::Result<()> {
         self.backdrop
@@ -161,6 +165,10 @@ impl Floating {
 impl Render for Floating {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let config = self.backend.config_snapshot();
+        if !config.floating {
+            self.clear_appearance();
+            return div().into_any_element();
+        }
         let data = self.backend.snapshot();
         let frame = self.measure.frame(&config.floating_content, &data);
         let (width, height) = natural_size(&frame, f32::from(config.floating_row_gap));
@@ -220,7 +228,6 @@ impl Render for Floating {
                 );
             })
             .detach();
-        let main = self.main.clone();
         let locked = config.floating_locked;
         let contents = div()
             .relative()
@@ -262,14 +269,16 @@ impl Render for Floating {
                     native::drag(h);
                 }
             })
-            .on_mouse_down(MouseButton::Right, move |_, _, _| {
-                native::foreground(main.load(std::sync::atomic::Ordering::Relaxed))
+            .on_mouse_down(MouseButton::Right, {
+                let backend = self.backend.clone();
+                move |_, _, _| backend.open()
             });
         div()
             .relative()
             .size_full()
             .child(halo(alpha, self.palette.dark))
             .child(div().size_full().p(px(SHADOW_MARGIN)).child(surface))
+            .into_any_element()
     }
 }
 

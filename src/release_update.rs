@@ -1,7 +1,7 @@
 use chrono::{DateTime, Months, TimeDelta, TimeZone, Utc};
 use semver::Version;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::BTreeMap, io::Read, path::Path, time::Duration};
+use std::{collections::BTreeMap, io::Read, path::Path, sync::OnceLock, time::Duration};
 
 pub const RELEASES_PAGE: &str = "https://github.com/windyy0/clash-mihomo-traffic/releases";
 pub const CACHE_FILE: &str = "update-cache.json";
@@ -93,14 +93,14 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Release {
     tag: String,
     notes: String,
     installer: bool,
     portable: bool,
     #[serde(skip)]
-    html: String,
+    html: OnceLock<String>,
 }
 
 impl Release {
@@ -128,30 +128,19 @@ impl Release {
             notes: release.body.unwrap_or_default(),
             installer,
             portable,
-            html: String::new(),
+            html: OnceLock::new(),
         };
-        result.prepare_notes();
+        result.limit_notes();
         Ok(result)
     }
 
-    fn prepare_notes(&mut self) {
+    fn limit_notes(&mut self) {
         if self.notes.len() > MAX_NOTES {
             self.notes
                 .truncate(self.notes.floor_char_boundary(MAX_NOTES));
             self.notes
                 .push_str("\n\n说明过长，请在 GitHub 查看完整内容。");
         }
-        // Release text can contain raw HTML and links. Render formatted text in
-        // the app, and use our own GitHub button for links and external media.
-        let mut options = markdown::Options::gfm();
-        let constructs = &mut options.parse.constructs;
-        constructs.autolink = false;
-        constructs.gfm_autolink_literal = false;
-        constructs.label_start_image = false;
-        constructs.label_start_link = false;
-        self.html = markdown::to_html_with_options(&self.notes, &options)
-            .map(|html| display_list_paragraphs(&html))
-            .unwrap_or_default();
     }
 
     pub fn tag(&self) -> &str {
@@ -159,7 +148,18 @@ impl Release {
     }
 
     pub fn notes_html(&self) -> &str {
-        &self.html
+        self.html.get_or_init(|| {
+            // Keep external links and media in the application's GitHub controls.
+            let mut options = markdown::Options::gfm();
+            let constructs = &mut options.parse.constructs;
+            constructs.autolink = false;
+            constructs.gfm_autolink_literal = false;
+            constructs.label_start_image = false;
+            constructs.label_start_link = false;
+            markdown::to_html_with_options(&self.notes, &options)
+                .map(|html| display_list_paragraphs(&html))
+                .unwrap_or_default()
+        })
     }
 
     pub fn matches_current(&self) -> bool {
@@ -260,7 +260,7 @@ fn current() -> Version {
     Version::parse(CURRENT).expect("Cargo package version is valid SemVer")
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Cache {
     pub latest: Option<Release>,
@@ -294,7 +294,7 @@ impl Cache {
             .chain(cache.current.iter_mut())
             .chain(cache.history.iter_mut().flatten())
         {
-            release.prepare_notes();
+            release.limit_notes();
         }
         cache
     }

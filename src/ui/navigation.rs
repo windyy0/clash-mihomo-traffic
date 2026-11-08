@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Page {
     Overview,
     Apps,
@@ -25,13 +25,13 @@ impl Page {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum DisplayTab {
     Taskbar,
     Floating,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum SettingsSection {
     General,
     Connection,
@@ -279,7 +279,7 @@ impl TrafficApp {
                     .when(!collapsed, |d| {
                         d.child(div().font_weight(FontWeight::NORMAL).child(page.label()))
                     })
-                    .when(page == Page::Settings && self.updates.has_unread(), |d| {
+                    .when(page == Page::Settings && self.updates.has_unread(cx), |d| {
                         d.child(
                             div()
                                 .absolute()

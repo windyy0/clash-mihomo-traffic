@@ -29,7 +29,6 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
-    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -57,6 +56,8 @@ mod apps_page;
 #[cfg(test)]
 mod apps_tests;
 mod backup_about;
+mod bridge;
+pub(crate) use bridge::UiBackend;
 #[cfg(test)]
 mod backup_about_tests;
 mod chart;
@@ -93,6 +94,7 @@ use controls::{PickerState, control_border, control_surface, popup_surface};
 mod display_editor;
 use display_editor::DisplayEditor;
 use floating::Floating;
+mod desktop_host;
 mod floating;
 mod navigation;
 mod window;
@@ -101,6 +103,7 @@ use apps_page::ApplicationAction;
 use backup_about::BackupAction;
 use connection::ConnectionAction;
 use connections_page::ConnectionsAction;
+pub use desktop_host::{run_desktop, run_interface_process};
 use display_editor::DisplayAction;
 use history_state::HistoryAction;
 use navigation::{DisplayTab, Page, SettingsSection};
@@ -108,7 +111,8 @@ use overview_page::OverviewAction;
 use seconds_page::DrillAction;
 use storage_settings::StorageAction;
 use window::apply_theme;
-pub use window::run;
+#[cfg(test)]
+use window::run;
 #[cfg(test)]
 mod floating_tests;
 
@@ -179,8 +183,7 @@ pub struct TrafficApp {
     overview_state: overview_page::State,
     seconds: seconds_page::State,
     expanded_application_path: Option<String>,
-    backend: Backend,
-    shell: mpsc::Receiver<UiEvent>,
+    backend: UiBackend,
     page: Page,
     display_tab: DisplayTab,
     settings_section: SettingsSection,
@@ -255,8 +258,11 @@ pub struct TrafficApp {
     tick: u64,
     last_search: String,
     main_hwnd: isize,
+    deferred_close: Cell<bool>,
     float_hwnd: isize,
     float_view: Entity<Floating>,
+    #[cfg(test)]
+    _window_queries: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -614,39 +620,10 @@ impl TrafficApp {
             return;
         }
         self.tick += 1;
-        if self.tick == 1 {
-            let args: Vec<_> = std::env::args_os().collect();
-            if let Some(index) = args.iter().position(|arg| arg == "--migration-ready")
-                && let Some(path) = args.get(index + 1)
-            {
-                let _ = std::fs::write(path, b"ready");
-            }
-        }
         if self.hotkey_recording
             && (!window.is_window_active() || !self.hotkey_focus.is_focused(window))
         {
             self.cancel_hotkey_recording(cx);
-        }
-        while let Ok(event) = self.shell.try_recv() {
-            match event {
-                UiEvent::Open | UiEvent::OpenOverview => {
-                    if matches!(event, UiEvent::OpenOverview) {
-                        self.act(Action::Nav(Page::Overview), window, cx);
-                    }
-                    self.wallpaper.request(self.main_hwnd);
-                    native::foreground(self.main_hwnd);
-                }
-                UiEvent::ToggleFloat => self.change_config("floating"),
-                UiEvent::HotkeyApplied { request, error } => {
-                    self.open_hotkey_applied(request, error, window, cx)
-                }
-                UiEvent::HotkeyRecorded(key) => self.record_open_hotkey(key, window, cx),
-                UiEvent::ToggleTaskbar => self.change_config("taskbar"),
-                UiEvent::Quit => {
-                    cx.quit();
-                    return;
-                }
-            }
         }
         let updated = self.backend.config_snapshot();
         let updated_content = match self.display_tab {
@@ -686,7 +663,7 @@ impl TrafficApp {
             );
         }
         self.config = updated;
-        self.poll_update_schedule(window, cx);
+        self.mark_update_seen(window, cx);
         self.sync_taskbar_editor(window, cx);
         self.sync_floating_controls(window, cx);
         native::titlebar_theme(
@@ -1020,8 +997,8 @@ impl TrafficApp {
             Action::Drill(action) => self.handle_drill_action(action, window, cx),
             Action::Reconnect => self.backend.send(Command::Reconnect),
             Action::Notice => {
+                self.backend.notice(String::new());
                 self.data.notice.clear();
-                self.backend.shared.lock().unwrap().notice.clear();
             }
         }
         if self.usage_detail.key.is_some() && !self.usage_detail_open() {

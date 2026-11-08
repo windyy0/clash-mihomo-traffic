@@ -152,7 +152,14 @@ impl TrafficApp {
             self.activity.recent_filter = recent;
             self.activity.recent_page = 0;
         }
-        let reply = self.backend.analysis_result();
+        let pending = self.activity.recent_pending.as_ref();
+        let preview_seen = self.activity.recent_provisional
+            && self
+                .activity
+                .recent_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| Some(&snapshot.request) == pending);
+        let reply = self.backend.analysis_result(pending, preview_seen);
         if let Some(reply) = reply
             && self.activity.recent_pending.as_ref() == Some(&reply.request)
         {

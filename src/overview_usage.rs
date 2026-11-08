@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Bin {
     pub from: i64,
     pub to: i64,
@@ -53,14 +53,14 @@ pub fn bins(series: &[SeriesPoint], from: i64, to: i64, now: i64) -> Vec<Bin> {
     result
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Request {
     pub id: u64,
     pub source: (u64, u64),
     pub from: i64,
     pub to: i64,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Detail {
     pub observed: bool,
     pub total: Bytes,
@@ -68,7 +68,7 @@ pub struct Detail {
     pub count: usize,
     pub unassigned: Bytes,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Reply {
     pub request: Request,
     pub result: Result<Detail, String>,

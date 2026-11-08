@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct View {
     pub from: i64,
     pub to: i64,
@@ -23,18 +23,18 @@ impl View {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     Second(i64),
     Minute(i64, i64),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HoverRequest {
     pub id: u64,
     pub window: SecondsRequest,
     pub target: Target,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct HoverData {
     pub observed: bool,
     pub from: i64,
@@ -45,7 +45,7 @@ pub struct HoverData {
     pub applications: Vec<Row>,
     pub unassigned: Bytes,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct HoverReply {
     pub request: HoverRequest,
     pub result: Result<HoverData, String>,

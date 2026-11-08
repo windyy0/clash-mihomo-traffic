@@ -27,7 +27,7 @@ impl From<&Config> for Policy {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     Seconds,
     Details,
@@ -40,7 +40,7 @@ impl Target {
         }
     }
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub categories: [u64; 4],
     pub physical: u64,
@@ -53,7 +53,7 @@ impl Snapshot {
         self.categories.iter().sum()
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Preview {
     pub id: u64,
     pub epoch: u64,
@@ -65,7 +65,7 @@ pub struct Preview {
     pub rows: u64,
     pub batches: u64,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub snapshot: Option<Snapshot>,
     pub refreshing: bool,
@@ -80,7 +80,7 @@ pub struct State {
     pub over_limit: bool,
     pub limit_note: String,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Request {
     Refresh {
         epoch: u64,

@@ -206,7 +206,7 @@ impl TrafficApp {
             view: Some(view),
         };
         drop(state);
-        self.seconds.sent = self.backend.speeds.query(request.clone());
+        self.seconds.sent = self.backend.query_seconds(request.clone());
         self.seconds.pending = Some(request);
         self.seconds.error.clear();
         cx.notify();
@@ -337,9 +337,9 @@ impl TrafficApp {
         if !self.seconds.sent
             && let Some(request) = self.seconds.pending.clone()
         {
-            self.seconds.sent = self.backend.speeds.query(request);
+            self.seconds.sent = self.backend.query_seconds(request);
         }
-        let reply = self.backend.speeds.reply.lock().unwrap().take();
+        let reply = self.backend.take_seconds();
         if let Some(reply) = reply
             && self.seconds.pending.as_ref() == Some(&reply.request)
             && self.seconds.scope.as_ref() == Some(&reply.request.scope)
@@ -362,9 +362,9 @@ impl TrafficApp {
         if !self.seconds.hover_sent
             && let Some(request) = self.seconds.hover_pending.clone()
         {
-            self.seconds.hover_sent = self.backend.speeds.hover(request);
+            self.seconds.hover_sent = self.backend.query_hover(request);
         }
-        let reply = self.backend.speeds.hover_reply.lock().unwrap().take();
+        let reply = self.backend.take_hover();
         if let Some(reply) = reply
             && self.seconds.hover_pending.as_ref() == Some(&reply.request)
             && self.seconds.loaded_request.as_ref() == Some(&reply.request.window)
@@ -435,7 +435,7 @@ impl TrafficApp {
                 window,
                 target,
             };
-            self.seconds.hover_sent = self.backend.speeds.hover(request.clone());
+            self.seconds.hover_sent = self.backend.query_hover(request.clone());
             self.seconds.hover_pending = Some(request);
         }
         cx.notify();

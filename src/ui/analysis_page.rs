@@ -26,7 +26,7 @@ pub(super) struct AnalysisState {
     pub snapshot: Option<Arc<Snapshot>>,
     pub pending: Option<AnalysisRequest>,
     pub provisional: bool,
-    next_id: u64,
+    pub(super) next_id: u64,
     pub error: String,
     pub focus: Option<String>,
     pub highlight: Option<i64>,
@@ -481,7 +481,14 @@ impl TrafficApp {
             self.analysis.search_value = search;
             self.analysis.app_page = 0;
         }
-        let reply = self.backend.analysis_result();
+        let pending = self.analysis.pending.as_ref();
+        let preview_seen = self.analysis.provisional
+            && self
+                .analysis
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| Some(&snapshot.request) == pending);
+        let reply = self.backend.analysis_result(pending, preview_seen);
         if let Some(reply) = reply
             && self.analysis.pending.as_ref() == Some(&reply.request)
         {

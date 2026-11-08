@@ -166,7 +166,7 @@ impl TrafficApp {
             }
         };
         self.storage_manager.serial = self.storage_manager.serial.wrapping_add(1);
-        self.storage_manager.pending = self.backend.speeds.manage(Request::Preview {
+        self.storage_manager.pending = self.backend.preview_storage(Request::Preview {
             id: self.storage_manager.serial,
             epoch: self.storage_manager.epoch,
             target,

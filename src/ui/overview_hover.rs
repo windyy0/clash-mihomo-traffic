@@ -136,7 +136,7 @@ impl TrafficApp {
             self.overview_state.pending = None;
         } else {
             self.overview_state.pending = Some(request.clone());
-            self.backend.overview_usage.query(request);
+            self.backend.query_usage(request);
         }
         cx.notify();
     }
@@ -215,7 +215,7 @@ impl TrafficApp {
         }) {
             self.close_overview_hover(cx);
         }
-        let reply = self.backend.overview_usage.reply.lock().unwrap().take();
+        let reply = self.backend.take_usage();
         if let Some(reply) = reply
             && self.overview_state.pending.as_ref() == Some(&reply.request)
             && self.overview_state.hover.is_some_and(|h| {

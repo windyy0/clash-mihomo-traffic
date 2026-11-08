@@ -183,23 +183,12 @@ impl TrafficApp {
                 self.connection_form.process_draft_dirty = true;
             }
             ConnectionAction::ApplyProcessDraft => {
-                self.backend
-                    .permanent_control
-                    .post(&self.backend, crate::permanent_control::Request::Cancel);
                 let policy = if self.connection_form.process_maintain_draft {
                     ProcessControl::Maintain(self.connection_form.process_draft)
                 } else {
                     ProcessControl::ApplyOnce(self.connection_form.process_draft)
                 };
-                if let Err(error) = self.backend.apply_process_mode(policy) {
-                    let mut shared = self.backend.shared.lock().unwrap();
-                    shared.process_error = format!("设置保存失败：{error:#}");
-                    shared.process_status = ProcessControlStatus::Failed;
-                } else {
-                    self.backend
-                        .permanent_control
-                        .paused
-                        .store(false, std::sync::atomic::Ordering::Release);
+                if self.backend.apply_process_mode(policy).is_ok() {
                     self.connection_form.process_draft_dirty = false;
                 }
             }
@@ -217,7 +206,7 @@ impl TrafficApp {
                     self.reset_permanent_draft();
                     self.connection_form.process_restore_notice_dismissed = false;
                 }
-                self.backend.permanent_control.post(&self.backend, request);
+                self.backend.permanent(request);
             }
             ConnectionAction::ChooseClientDirectory => {
                 let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -233,8 +222,7 @@ impl TrafficApp {
                     {
                         let _ = this.update(cx, |app, _| {
                             if app.config.endpoint == expected_endpoint {
-                                app.backend.permanent_control.post(
-                                    &app.backend,
+                                app.backend.permanent(
                                     crate::permanent_control::Request::SelectDirectory(path),
                                 );
                             }

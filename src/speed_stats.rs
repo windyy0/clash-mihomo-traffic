@@ -40,12 +40,12 @@ impl From<&Config> for SecondsPolicy {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Peak {
     pub rate: f64,
     pub at: i64,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SpeedStats {
     pub bytes: Bytes,
     pub covered_ms: u64,
@@ -68,7 +68,7 @@ impl SpeedStats {
         self.covered_ms.saturating_add(2) < self.expected_ms
     }
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SecondsStatus {
     pub bytes: u64,
     pub first: Option<i64>,
@@ -118,7 +118,7 @@ impl Sample {
         })
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Scope {
     pub from: i64,
     pub to: i64,
@@ -135,7 +135,7 @@ impl From<&Query> for Scope {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SecondsRequest {
     pub id: u64,
     pub generation: u64,
@@ -144,7 +144,7 @@ pub struct SecondsRequest {
     pub from: Option<i64>,
     pub view: Option<crate::traffic_drill::View>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SecondsData {
     pub from: i64,
     pub to: i64,
@@ -153,7 +153,7 @@ pub struct SecondsData {
     pub samples: Vec<SecondSample>,
     pub trend: Option<crate::history::Trend>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SecondSample {
     pub seq: i64,
     pub from: i64,
@@ -163,7 +163,7 @@ pub struct SecondSample {
     pub up: f64,
     pub valid: bool,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SecondsReply {
     pub request: SecondsRequest,
     pub result: Result<SecondsData, String>,

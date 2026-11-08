@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     #[default]
     Idle,
@@ -29,7 +29,7 @@ pub enum Status {
     Restored,
     Failed,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct View {
     pub available: bool,
     pub client: String,
@@ -42,7 +42,7 @@ pub struct View {
     pub launch_available: bool,
     pub restoring: bool,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Request {
     Save(ProcessMode),
     Restore,

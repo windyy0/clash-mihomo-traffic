@@ -1,6 +1,6 @@
 use super::*;
 use crate::config_writer::ConfigWriter;
-use std::sync::Condvar;
+use std::sync::{Condvar, mpsc};
 
 unsafe fn own_dock() -> HWND {
     let mut child = null_mut();
