@@ -56,6 +56,16 @@ fn start() -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--exit") {
         return native::request_app_exit();
     }
+    if args.iter().any(|a| a == "--purge-personal-data") {
+        return data_location::purge_personal_data(&config::default_data_dir());
+    }
+    if args.get(1).is_some_and(|arg| arg == "--continue-uninstall") {
+        let [_, _, parent, filename, choice] = args.as_slice() else {
+            anyhow::bail!("卸载参数不完整");
+        };
+        anyhow::ensure!(matches!(choice.as_str(), "keep" | "remove"), "卸载选项无效");
+        return native::continue_uninstall(parent.parse()?, filename, choice == "remove");
+    }
     if args.iter().any(|a| a == "--probe-taskbar") {
         return taskbar_probe::diagnostic();
     }
@@ -126,6 +136,7 @@ fn main() {
                     | "--probe-taskbar"
                     | "--relocate-data"
                     | "--migration-ready"
+                    | "--purge-personal-data"
             )
         }) {
             unsafe {

@@ -28,27 +28,107 @@ struct Location {
     directory: PathBuf,
 }
 
-pub fn resolve(default: &Path) -> Result<PathBuf> {
+fn configured_directory(default: &Path) -> Result<Option<PathBuf>> {
     let path = default.join("data-location.toml");
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(default.to_path_buf());
+            return Ok(None);
         }
         Err(error) => return Err(error).context("无法读取数据目录定位文件"),
     };
     let location: Location = toml::from_str(&contents).context("数据目录定位文件格式错误")?;
+    Ok(Some(location.directory))
+}
+
+pub fn resolve(default: &Path) -> Result<PathBuf> {
+    let Some(directory) = configured_directory(default)? else {
+        return Ok(default.to_path_buf());
+    };
     ensure!(
-        location.directory.is_absolute() && location.directory.is_dir(),
+        directory.is_absolute() && directory.is_dir(),
         "已保存的数据目录不存在：{}",
-        location.directory.display()
+        directory.display()
     );
     ensure!(
-        location.directory.join("traffic.sqlite3").is_file(),
+        directory.join("traffic.sqlite3").is_file(),
         "已保存的数据目录缺少数据库：{}",
-        location.directory.display()
+        directory.display()
     );
-    Ok(location.directory)
+    Ok(directory)
+}
+
+/// Uninstallation can remove the current data and the default directory's
+/// local copy. Backups, exports, and other files in either directory are user-owned.
+pub fn purge_personal_data(default: &Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    const PERSONAL_FILES: &[&str] = &[
+        "config.toml",
+        "config.toml.tmp",
+        "traffic.sqlite3-wal",
+        "traffic.sqlite3-shm",
+        "traffic.sqlite3-journal",
+        "traffic.sqlite3",
+        "traffic.log",
+        "traffic.previous.log",
+        crate::release_update::CACHE_FILE,
+    ];
+    let regular_file_exists = |path: &Path| -> Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                ensure!(
+                    meta.is_file() && meta.file_attributes() & 0x400 == 0,
+                    "无法清除非普通文件：{}",
+                    path.display()
+                );
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("无法读取 {}", path.display())),
+        }
+    };
+
+    ensure!(default.is_absolute(), "数据目录须为绝对路径");
+    if !default.try_exists()? {
+        return Ok(());
+    }
+    let default = fs::canonicalize(default)?;
+    let _default_lock = lock_directory(&default)?;
+    let locator = default.join("data-location.toml");
+    let mut directories = vec![default.clone()];
+    if regular_file_exists(&locator)?
+        && let Some(active) = configured_directory(&default)?
+    {
+        ensure!(active.is_absolute(), "数据目录须为绝对路径");
+        if active.try_exists()? {
+            let active = fs::canonicalize(active)?;
+            if path_key(&active) != path_key(&default) {
+                directories.push(active);
+            }
+        }
+    }
+    let _active_lock = directories
+        .get(1)
+        .map(|dir| lock_directory(dir))
+        .transpose()?;
+
+    // Validate every target before removing any files. Keep the locator until
+    // the end so a retry can still reach the active directory.
+    let mut files = Vec::new();
+    for path in directories
+        .iter()
+        .flat_map(|dir| PERSONAL_FILES.iter().map(move |name| dir.join(name)))
+        .chain([default.join("data-location.toml.tmp"), locator])
+    {
+        if regular_file_exists(&path)? {
+            files.push(path);
+        }
+    }
+    for path in files {
+        fs::remove_file(&path).with_context(|| format!("无法删除 {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn set_location(default: &Path, target: &Path) -> Result<()> {
@@ -519,6 +599,45 @@ mod tests {
         .unwrap();
         fs::write(path.join("traffic.log"), b"log").unwrap();
         path
+    }
+
+    #[test]
+    fn uninstall_purges_default_and_relocated_data_but_keeps_backups_and_exports() {
+        let root = tempfile::tempdir().unwrap();
+        let default = fixture(root.path(), "default", 10);
+        let active = fixture(root.path(), "relocated", 20);
+        set_location(&default, &active).unwrap();
+        fs::write(active.join("keep.txt"), b"unrelated").unwrap();
+        let lock = lock_directory(&active).unwrap();
+        assert!(purge_personal_data(&default).is_err());
+        assert!(default.join("config.toml").is_file());
+        assert!(active.join("traffic.sqlite3").is_file());
+        drop(lock);
+
+        purge_personal_data(&default).unwrap();
+        purge_personal_data(&default).unwrap();
+        assert!(!default.join("data-location.toml").exists());
+        for dir in [&default, &active] {
+            for file in ["config.toml", "traffic.sqlite3", "traffic.log"] {
+                assert!(
+                    !dir.join(file).exists(),
+                    "{file} was left in {}",
+                    dir.display()
+                );
+            }
+            for file in [
+                "backups/test.sqlite3",
+                "client-config-backups/manifest.json",
+                "exports/test.csv",
+            ] {
+                assert!(
+                    dir.join(file).is_file(),
+                    "{file} was removed from {}",
+                    dir.display()
+                );
+            }
+        }
+        assert!(active.join("keep.txt").is_file());
     }
 
     fn total(path: &Path) -> u64 {

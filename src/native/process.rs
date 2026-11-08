@@ -1,6 +1,6 @@
 //! Local process, listener, and client discovery and Windows launch settings.
 use super::wide;
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use std::{
     path::Path,
     ptr::{null, null_mut},
@@ -9,6 +9,51 @@ use windows_sys::Win32::{
     Foundation::*,
     System::{Pipes::GetNamedPipeServerProcessId, Registry::*, Threading::*},
 };
+
+/// A directly opened Inno uninstaller holds its uninstall log until it exits.
+/// Continue with the confirmed choice after that process has released the log.
+pub fn continue_uninstall(parent: u32, filename: &str, remove_data: bool) -> Result<()> {
+    ensure!(
+        parent != 0 && parent != std::process::id(),
+        "卸载进程编号无效"
+    );
+    ensure!(
+        filename
+            .strip_prefix("unins")
+            .and_then(|name| name.strip_suffix(".exe"))
+            .is_some_and(|digits| digits.len() == 3 && digits.bytes().all(|b| b.is_ascii_digit())),
+        "卸载程序文件名无效"
+    );
+    let uninstaller = std::env::current_exe()?.with_file_name(filename);
+    ensure!(
+        uninstaller.is_file() && uninstaller.with_extension("dat").is_file(),
+        "找不到卸载程序或卸载记录"
+    );
+
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, parent) };
+    if process.is_null() {
+        let error = std::io::Error::last_os_error();
+        // The first uninstaller may have already exited before this helper starts.
+        if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {
+            return Err(error).context("无法等待卸载确认窗口退出");
+        }
+    } else {
+        let result = unsafe {
+            let result = WaitForSingleObject(process, 30_000);
+            CloseHandle(process);
+            result
+        };
+        ensure!(result == WAIT_OBJECT_0, "等待卸载确认窗口退出超时");
+    }
+
+    let mut command = std::process::Command::new(uninstaller);
+    command.args(["/SILENT", "/NORESTART"]);
+    if remove_data {
+        command.arg("/MIHOMODELETEDATA=1");
+    }
+    command.spawn().context("无法继续卸载")?;
+    Ok(())
+}
 
 pub fn pipe_server_process(handle: HANDLE) -> Result<u32> {
     unsafe {

@@ -7,8 +7,8 @@ mod taskbar;
 mod window;
 
 pub use process::{
-    autorun, local_api_process, nyanpasu_custom_config_dir, open_folder, pipe_owner,
-    pipe_server_process, process_identity, proxy_applications, proxy_client_name,
+    autorun, continue_uninstall, local_api_process, nyanpasu_custom_config_dir, open_folder,
+    pipe_owner, pipe_server_process, process_identity, proxy_applications, proxy_client_name,
 };
 pub use taskbar::{
     UiEvent, adjustment_keys, apply_hotkey, request_app_exit, request_taskbar_update,
