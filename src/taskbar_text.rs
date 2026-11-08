@@ -227,6 +227,26 @@ impl PartWidths {
     }
 }
 
+struct CellWidths {
+    reserved: PartWidths,
+    network_number_width: f32,
+}
+
+impl CellWidths {
+    fn new(mut reserved: PartWidths, network_number_width: f32) -> Self {
+        reserved.0[1] = reserved.0[1].max(network_number_width);
+        Self {
+            reserved,
+            network_number_width,
+        }
+    }
+}
+
+struct CellValue {
+    text: String,
+    number_width: f32,
+}
+
 fn value_parts(value: &str) -> (&str, &str) {
     let start = value
         .char_indices()
@@ -308,10 +328,10 @@ fn cached_preview_frame(
     }
     // Keep the editor usable even if DirectWrite initialization failed.
     let mut widths = std::collections::HashMap::new();
+    let mut values = std::collections::HashMap::new();
     for item in content.rows.iter().flatten() {
-        let mut parts = PartWidths::default();
-        for value in item.samples().into_iter().chain([item.value(data)]) {
-            let (number, unit) = value_parts(&value);
+        let estimate = |value: &str| {
+            let (number, unit) = value_parts(value);
             let measure = |text: &str| {
                 if text.is_empty() {
                     0.
@@ -319,7 +339,7 @@ fn cached_preview_frame(
                     text.chars().count() as f32 * content.font_size * 0.75 + CELL_RASTER_PADDING
                 }
             };
-            parts.merge(PartWidths([
+            PartWidths([
                 if item.direction_icon().is_some() {
                     content.font_size + measure(&item.prefix_text())
                 } else {
@@ -327,11 +347,21 @@ fn cached_preview_frame(
                 },
                 measure(number),
                 measure(unit),
-            ]));
+            ])
+        };
+        let text = item.value(data);
+        let mut parts = estimate(&text);
+        let number_width = parts.0[1];
+        for sample in item.samples() {
+            parts.merge(estimate(&sample));
         }
-        widths.insert(item.metric, parts);
+        let network_number_width = item
+            .network_number_sample()
+            .map_or(0., |sample| estimate(&sample).0[1]);
+        widths.insert(item.metric, CellWidths::new(parts, network_number_width));
+        values.insert(item.metric, CellValue { text, number_width });
     }
-    arrange(content, data, &widths)
+    arrange(content, &widths, &values)
 }
 
 /// Inspect an existing cell without losing its shared column reservations.
@@ -356,19 +386,29 @@ pub fn example_frame(content: &TaskbarContent, data: &Shared, item: &TaskbarItem
 
 fn arrange(
     content: &TaskbarContent,
-    data: &Shared,
-    widths: &std::collections::HashMap<Metric, PartWidths>,
+    widths: &std::collections::HashMap<Metric, CellWidths>,
+    values: &std::collections::HashMap<Metric, CellValue>,
 ) -> ContentFrame {
     let columns = content.rows.iter().map(Vec::len).max().unwrap_or(0);
-    let column_widths: Vec<PartWidths> = (0..columns)
+    let column_widths: Vec<_> = (0..columns)
         .map(|column| {
             let mut parts = PartWidths::default();
-            for row in &content.rows {
-                if let Some(item) = row.get(column) {
-                    parts.merge(widths[&item.metric]);
-                }
+            let mut live_number_width = 0f32;
+            let mut network_number_width = 0f32;
+            for item in content.rows.iter().filter_map(|row| row.get(column)) {
+                let measured = &widths[&item.metric];
+                parts.merge(measured.reserved);
+                live_number_width = live_number_width.max(values[&item.metric].number_width);
+                network_number_width = network_number_width.max(measured.network_number_width);
             }
-            parts
+            // Hold the unit in place for ordinary speeds. Wider readings can
+            // use the rest of the cell without moving the neighboring cells.
+            let number_width = if network_number_width > 0. {
+                live_number_width.max(network_number_width)
+            } else {
+                parts.0[1]
+            };
+            (parts, number_width)
         })
         .collect();
     let rows = content
@@ -379,9 +419,9 @@ fn arrange(
             row.iter()
                 .enumerate()
                 .map(|(column, item)| {
-                    let value = item.value(data);
-                    let (number, unit) = value_parts(&value);
-                    let parts = column_widths[column];
+                    let value = &values[&item.metric].text;
+                    let (number, unit) = value_parts(value);
+                    let (parts, number_width) = column_widths[column];
                     let number_x = x
                         + parts.0[0]
                         + if parts.0[0] > 0. {
@@ -389,10 +429,10 @@ fn arrange(
                         } else {
                             0.
                         };
-                    let unit_x = number_x + parts.0[1] + if parts.0[2] > 0. { 3. } else { 0. };
+                    let unit_x = number_x + number_width + if parts.0[2] > 0. { 3. } else { 0. };
                     let cell = ContentCell {
                         metric: item.metric,
-                        text: item.text(&value, content.rows.len() == 1),
+                        text: item.text(value, content.rows.len() == 1),
                         x,
                         width: parts.total(content.prefix_gap),
                         text_color: item.text_color,
@@ -409,7 +449,7 @@ fn arrange(
                                 text: number.into(),
                                 icon: None,
                                 x: number_x,
-                                width: parts.0[1],
+                                width: number_width,
                                 right_aligned: true,
                             },
                             ContentSegment {
@@ -430,7 +470,7 @@ fn arrange(
     let width = TEXT_PADDING * 2.
         + column_widths
             .iter()
-            .map(|parts| parts.total(content.prefix_gap))
+            .map(|(parts, _)| parts.total(content.prefix_gap))
             .sum::<f32>()
         + f32::from(content.gap) * columns.saturating_sub(1) as f32;
     ContentFrame {
@@ -531,8 +571,8 @@ pub struct TaskbarText {
     #[cfg(test)]
     last_text: Option<(bool, Vec<u16>)>,
     content: Option<TaskbarContent>,
-    cell_widths: std::collections::HashMap<Metric, PartWidths>,
-    cell_texts: std::collections::HashMap<Metric, String>,
+    cell_widths: std::collections::HashMap<Metric, CellWidths>,
+    cell_values: std::collections::HashMap<Metric, CellValue>,
 }
 
 impl TaskbarText {
@@ -589,7 +629,7 @@ impl TaskbarText {
                 last_text: None,
                 content: None,
                 cell_widths: Default::default(),
-                cell_texts: Default::default(),
+                cell_values: Default::default(),
             })
         }
     }
@@ -666,7 +706,7 @@ impl TaskbarText {
                 self.right_format = right_format;
             }
             self.cell_widths.clear();
-            self.cell_texts.clear();
+            self.cell_values.clear();
             self.prefix_layouts.clear();
             for item in content.rows.iter().flatten() {
                 let text = item.prefix_text();
@@ -679,20 +719,40 @@ impl TaskbarText {
                 for value in item.samples() {
                     parts.merge(self.part_widths(item, &value, content.font_size)?);
                 }
-                self.cell_widths.insert(item.metric, parts);
+                let network_number_width = if let Some(sample) = item.network_number_sample() {
+                    self.part_widths(item, &sample, content.font_size)?.0[1]
+                } else {
+                    0.
+                };
+                self.cell_widths
+                    .insert(item.metric, CellWidths::new(parts, network_number_width));
             }
             self.content = Some(content.clone());
         }
         for item in content.rows.iter().flatten() {
-            let value = item.value(data);
-            if self.cell_texts.get(&item.metric) == Some(&value) {
+            let text = item.value(data);
+            if self
+                .cell_values
+                .get(&item.metric)
+                .is_some_and(|value| value.text == text)
+            {
                 continue;
             }
-            let parts = self.part_widths(item, &value, content.font_size)?;
-            self.cell_widths.get_mut(&item.metric).unwrap().merge(parts);
-            self.cell_texts.insert(item.metric, value);
+            let parts = self.part_widths(item, &text, content.font_size)?;
+            self.cell_widths
+                .get_mut(&item.metric)
+                .unwrap()
+                .reserved
+                .merge(parts);
+            self.cell_values.insert(
+                item.metric,
+                CellValue {
+                    text,
+                    number_width: parts.0[1],
+                },
+            );
         }
-        Ok(arrange(content, data, &self.cell_widths))
+        Ok(arrange(content, &self.cell_widths, &self.cell_values))
     }
 
     /// Draw all cells in one transparent surface. Cell widths include glyph
@@ -927,6 +987,34 @@ mod tests {
         assert_eq!(frame.rows[1][0].segments[2].text, "%");
         assert_eq!(frame.rows[0][1].segments[2].text, "K/s");
         assert_eq!(frame.rows[1][1].segments[2].text, "M/s");
+    }
+
+    #[test]
+    fn network_units_stay_put_through_three_digits() {
+        let content = TaskbarContent::default();
+        let mut renderer = TaskbarText::new().unwrap();
+        let mut data = Shared {
+            connected: true,
+            up: 64.,
+            down: 1.2 * 1024.,
+            ..Default::default()
+        };
+        let first = renderer.frame(&content, &data).unwrap();
+        let unit_x = |frame: &ContentFrame| frame.rows[0][1].segments[2].x;
+        data.down = 999.9 * 1024.;
+        let ordinary = renderer.frame(&content, &data).unwrap();
+        assert_eq!(unit_x(&first), unit_x(&ordinary));
+        assert_eq!(unit_x(&ordinary), ordinary.rows[1][1].segments[2].x);
+
+        data.down = 1024. * 1024. - 1.;
+        let wide = renderer.frame(&content, &data).unwrap();
+        assert_eq!(wide.rows[1][1].segments[1].text, "1024.0");
+        assert!(unit_x(&wide) > unit_x(&ordinary));
+        assert_eq!(wide.width, first.width);
+
+        data.down = 1.2 * 1024.;
+        let small_again = renderer.frame(&content, &data).unwrap();
+        assert_eq!(unit_x(&small_again), unit_x(&first));
     }
 
     struct Bitmap {

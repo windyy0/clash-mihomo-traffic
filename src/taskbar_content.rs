@@ -491,6 +491,18 @@ impl TaskbarItem {
         }
     }
 
+    /// Three integer digits at the highest precision this rate can display.
+    pub fn network_number_sample(&self) -> Option<String> {
+        matches!(
+            self.metric,
+            Metric::Upload | Metric::Download | Metric::TotalSpeed
+        )
+        .then(|| {
+            let precision = self.decimals(usize::from(self.effective_unit() != ByteUnit::B));
+            format!("{:.*}", precision, 888.)
+        })
+    }
+
     pub fn samples(&self) -> Vec<String> {
         let mut values = vec!["—".into(), "离线".into()];
         if self.metric.is_rate() || self.metric.group() == "流量" {
