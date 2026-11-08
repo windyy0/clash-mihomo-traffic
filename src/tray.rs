@@ -93,9 +93,7 @@ impl Tray {
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = CALLBACK;
         data.hIcon = image.handle;
-        let tip: Vec<_> = "Mihomo Traffic · 单击打开，右键菜单\0"
-            .encode_utf16()
-            .collect();
+        let tip: Vec<_> = "Mihomo Traffic\0".encode_utf16().collect();
         data.szTip[..tip.len()].copy_from_slice(&tip);
         let mut action = if self.added { NIM_MODIFY } else { NIM_ADD };
         if unsafe { Shell_NotifyIconW(action, &data) } == 0 {

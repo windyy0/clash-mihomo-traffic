@@ -2,8 +2,8 @@
 102 ICON "tray-dark.ico"
 103 ICON "tray-light.ico"
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
 FILEOS 0x40004L
 FILETYPE 0x1L
 BEGIN
@@ -13,8 +13,8 @@ BEGIN
   BEGIN
    VALUE "FileDescription", "Mihomo Traffic\0"
    VALUE "ProductName", "Mihomo Traffic\0"
-   VALUE "FileVersion", "0.1.0\0"
-   VALUE "ProductVersion", "0.1.0\0"
+   VALUE "FileVersion", "0.2.0\0"
+   VALUE "ProductVersion", "0.2.0\0"
    VALUE "OriginalFilename", "mihomo-traffic.exe\0"
   END
  END
