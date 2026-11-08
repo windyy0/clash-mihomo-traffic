@@ -47,6 +47,15 @@ mod wallpaper;
 
 fn start() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == "--apply-portable-update")
+    {
+        let [_, _, executable_name, data_dir] = args.as_slice() else {
+            anyhow::bail!("便携版更新参数不完整。")
+        };
+        return release_update::portable::apply(executable_name.as_ref(), data_dir.as_ref());
+    }
     if args.get(1).is_some_and(|arg| arg == "--desktop-ui") {
         return ui::run_interface_process(args.get(2).map(String::as_str));
     }
@@ -76,6 +85,13 @@ fn start() -> anyhow::Result<()> {
         return backend::probe();
     }
     let headless = args.iter().any(|a| a == "--headless");
+    if let Some([_, name, pid]) = args
+        .windows(3)
+        .find(|args| args[0] == "--portable-update-cleanup")
+        && let Ok(pid) = pid.parse()
+    {
+        release_update::portable::cleanup(name.as_ref(), pid);
+    }
     let _instance = if headless {
         None
     } else {

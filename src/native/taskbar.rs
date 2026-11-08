@@ -9,6 +9,7 @@ use crate::{
 };
 use anyhow::Result;
 use std::{
+    path::Path,
     ptr::{null, null_mut},
     sync::{
         Arc, Mutex,
@@ -131,12 +132,26 @@ unsafe extern "system" fn taskbar_event(
 
 /// Use the tray's normal exit path, including pending configuration and data saves.
 pub fn request_app_exit() -> Result<()> {
+    request_matching_app_exit(None)
+}
+
+pub(crate) fn request_matching_app_exit(executable: Option<&Path>) -> Result<()> {
     unsafe {
         let shell = FindWindowW(
             wide("MihomoTrafficShell").as_ptr(),
             wide("Mihomo Traffic Shell").as_ptr(),
         );
         if !shell.is_null() {
+            if let Some(executable) = executable {
+                let mut pid = 0;
+                GetWindowThreadProcessId(shell, &mut pid);
+                let running = super::process::process_executable(pid)
+                    .and_then(|path| std::fs::canonicalize(path).ok());
+                anyhow::ensure!(
+                    running.as_deref() == Some(executable),
+                    "当前运行的是另一份 Mihomo Traffic，无法更新此便携版。"
+                );
+            }
             anyhow::ensure!(
                 PostMessageW(shell, WM_COMMAND, 4, 0) != 0,
                 "无法请求程序正常退出"

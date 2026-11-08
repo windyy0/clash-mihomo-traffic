@@ -20,10 +20,14 @@ fn fixture_release(tag: &str, body: &str) -> Value {
 }
 
 async fn fixture_api(
-    replies: Vec<(&'static str, &'static str, String, &'static str)>,
+    replies: Vec<(&str, &'static str, String, &'static str)>,
 ) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}/releases", listener.local_addr().unwrap());
+    let replies: Vec<_> = replies
+        .into_iter()
+        .map(|(path, status, body, headers)| (path.to_owned(), status, body, headers))
+        .collect();
     let server = tokio::spawn(async move {
         for (path, status, body, extra_headers) in replies {
             let (mut connection, _) = listener.accept().await.unwrap();
@@ -91,74 +95,84 @@ async fn reads_latest_release_and_matches_the_package_type() {
 }
 
 #[tokio::test]
-async fn paginates_history_and_caches_formal_releases_offline() {
-    let mut version = current();
-    version.patch += 1;
-    let tag = format!("v{version}");
-    let newer = fixture_release(&tag, "**历史中的新说明**");
-    let installed = fixture_release(&format!("v{CURRENT}"), "当前版本说明");
-    let mut preview = newer.clone();
-    preview["prerelease"] = json!(true);
+async fn reads_current_notes_from_the_exact_tag() {
+    let tag = format!("v{CURRENT}");
+    let path = format!("/releases/tags/{tag}");
+    let installed = fixture_release(&tag, "当前版本说明");
     let (api, server) = fixture_api(vec![
         (
-            "/releases?per_page=20&page=1",
+            &path,
             "200 OK",
-            json!([installed, preview]).to_string(),
-            "Link: <https://api.github.com/repositories/42/releases?page=2>; rel=\"next\"\r\n",
-        ),
-        (
-            "/releases?per_page=20&page=2",
-            "200 OK",
-            json!([newer]).to_string(),
-            "",
-        ),
-    ])
-    .await;
-    let history = request_history(&fixture_client(), &api).await.unwrap();
-    server.await.unwrap();
-    assert_eq!(history.len(), 2);
-
-    let dir = tempfile::tempdir().unwrap();
-    let stale = fixture_release(&tag, "旧版缓存");
-    Cache {
-        latest: Some(Release::parse(serde_json::from_value(stale).unwrap()).unwrap()),
-        history: Some(history),
-        ..Default::default()
-    }
-    .save(dir.path())
-    .unwrap();
-    let cache = Cache::load(dir.path());
-    let releases: Vec<_> = cache.releases().collect();
-    assert_eq!(releases.len(), 2);
-    assert_eq!(releases[0].tag(), tag);
-    assert!(
-        releases[0]
-            .notes_html()
-            .contains("<strong>历史中的新说明</strong>")
-    );
-    assert!(releases[1].matches_current());
-}
-
-#[tokio::test]
-async fn an_incomplete_history_fetch_returns_an_error() {
-    let (api, server) = fixture_api(vec![
-        (
-            "/releases?per_page=20&page=1",
-            "200 OK",
-            "[]".into(),
+            installed.to_string(),
             "Link: </releases?page=2>; rel=\"next\"\r\n",
         ),
         (
-            "/releases?per_page=20&page=2",
-            "429 Too Many Requests",
-            "{}".into(),
+            &path,
+            "200 OK",
+            fixture_release("v0.0.0", "其他版本说明").to_string(),
             "",
         ),
     ])
     .await;
-    let result = request_history(&fixture_client(), &api).await;
+    let client = fixture_client();
+    let release = Release::parse(request_tag(&client, &api, &tag).await.unwrap()).unwrap();
+    assert!(release.matches_current());
+    assert!(release.notes_html().contains("当前版本说明"));
+    assert_eq!(
+        request_tag(&client, &api, &tag).await.err(),
+        Some(CheckError::Invalid)
+    );
     server.await.unwrap();
-    assert_eq!(result.err(), Some(CheckError::RateLimited));
+}
+
+#[test]
+fn retains_only_current_notes_from_a_legacy_history_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CACHE_FILE);
+    let old =
+        json!({"tag": "v0.0.0", "notes": "其他版本说明", "installer": false, "portable": false});
+    let installed = json!({"tag": format!("v{CURRENT}"), "notes": "当前版本说明", "installer": true, "portable": true});
+    std::fs::write(
+        &path,
+        json!({"current": old, "history": [old, installed]}).to_string(),
+    )
+    .unwrap();
+    let cache = Cache::load(dir.path());
+    assert!(
+        cache
+            .current_release()
+            .unwrap()
+            .notes_html()
+            .contains("当前版本说明")
+    );
+    cache.save(dir.path()).unwrap();
+    let contents = std::fs::read_to_string(path).unwrap();
+    assert!(!contents.contains("history") && !contents.contains("其他版本说明"));
+}
+
+#[tokio::test]
+async fn installer_download_requires_the_published_sha256() {
+    let (api, server) = fixture_api(vec![
+        ("/releases/setup.exe", "200 OK", "abc".into(), ""),
+        ("/releases/setup.exe", "200 OK", "abd".into(), ""),
+    ])
+    .await;
+    let url = format!("{api}/setup.exe");
+    let hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    let client = fixture_client();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    installer::download_verified(&client, &url, hash, file.as_file_mut())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(file.path()).unwrap(), b"abc");
+
+    let mut file = tempfile::tempfile().unwrap();
+    assert!(
+        installer::download_verified(&client, &url, hash, &mut file)
+            .await
+            .is_err()
+    );
+    server.await.unwrap();
 }
 
 #[test]

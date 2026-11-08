@@ -3,6 +3,8 @@ use crate::release_update::{self, Cache, CheckError, CheckFrequency, Release};
 use chrono::{Local, Utc};
 use gpui_component::text::TextView;
 
+const FEEDBACK_DURATION: Duration = Duration::from_secs(30);
+
 #[derive(Clone, Copy)]
 pub(super) enum UpdateAction {
     Check,
@@ -31,10 +33,10 @@ enum Notice<'a> {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) enum CheckAction {
     Check,
-    Dismiss,
+    Dismiss { tag: Option<String> },
     Seen,
     Frequency(CheckFrequency),
-    History { force: bool },
+    Notes { force: bool },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -42,7 +44,7 @@ pub(super) struct CheckSnapshot {
     cache: Cache,
     latest: Fetch,
     manual_feedback: bool,
-    history: Fetch,
+    current_notes: Fetch,
     revision: u64,
 }
 
@@ -52,8 +54,9 @@ pub(super) struct ReleaseChecks {
     latest: Fetch,
     pending_latest: Option<std::sync::mpsc::Receiver<Result<Release, CheckError>>>,
     manual_feedback: bool,
-    history: Fetch,
-    pending_history: Option<std::sync::mpsc::Receiver<Result<Vec<Release>, CheckError>>>,
+    feedback_deadline: Option<Instant>,
+    current_notes: Fetch,
+    pending_current_notes: Option<std::sync::mpsc::Receiver<Result<Release, CheckError>>>,
     revision: u64,
 }
 
@@ -62,19 +65,32 @@ pub(super) struct State {
     notes_open: bool,
     notes_opener: FocusHandle,
     notes_controls: [FocusHandle; 4],
+    current_notes_scroll: ScrollHandle,
     notes_scroll: ScrollHandle,
     portable: bool,
+    install_dir: Option<std::path::PathBuf>,
+    installing: bool,
+    install_error: Option<String>,
 }
 
 impl State {
     pub(super) fn new(checks: Entity<ReleaseChecks>, cx: &mut App) -> Self {
+        let portable = crate::config::portable_data_dir().is_some();
         Self {
             checks,
             notes_open: false,
             notes_opener: cx.focus_handle(),
             notes_controls: std::array::from_fn(|_| cx.focus_handle()),
+            current_notes_scroll: ScrollHandle::new(),
             notes_scroll: ScrollHandle::new(),
-            portable: crate::config::portable_data_dir().is_some(),
+            portable,
+            install_dir: if portable {
+                None
+            } else {
+                crate::native::installed_app_dir()
+            },
+            installing: false,
+            install_error: None,
         }
     }
 
@@ -87,6 +103,18 @@ impl State {
             .read(cx)
             .newer_release()?
             .download_url(self.portable)
+    }
+
+    fn download_label(&self) -> &'static str {
+        if self.installing {
+            "正在下载或更新…"
+        } else if self.portable {
+            "下载并更新"
+        } else if self.install_dir.is_some() {
+            "下载并安装"
+        } else {
+            "下载更新"
+        }
     }
 }
 
@@ -107,19 +135,34 @@ impl ReleaseChecks {
         }
     }
 
-    fn dismiss_notice(&mut self) -> bool {
-        let dismissed = match self.notice() {
-            Some(Notice::Update(release)) => Some(release.tag().to_string()),
-            _ => None,
-        };
-        self.manual_feedback = false;
-        if let Some(tag) = dismissed {
+    fn dismiss_notice(&mut self, tag: Option<String>) -> bool {
+        self.feedback_deadline = None;
+        let feedback = std::mem::take(&mut self.manual_feedback);
+        if let Some(tag) = tag.filter(|tag| {
+            self.cache
+                .update_notice()
+                .is_some_and(|release| release.tag() == tag)
+        }) {
             self.cache.dismissed_tag = Some(tag);
+            self.store();
             true
         } else {
-            false
+            feedback
         }
     }
+
+    fn expire_feedback(&mut self, now: Instant) -> bool {
+        if self
+            .feedback_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.feedback_deadline = None;
+            self.manual_feedback = false;
+            return true;
+        }
+        false
+    }
+
     pub(super) fn new(dir: std::path::PathBuf) -> Self {
         let mut checks = Self::mirror(dir);
         checks.cache = Cache::load(&checks.dir);
@@ -135,8 +178,9 @@ impl ReleaseChecks {
             latest: Fetch::Idle,
             pending_latest: None,
             manual_feedback: false,
-            history: Fetch::Idle,
-            pending_history: None,
+            feedback_deadline: None,
+            current_notes: Fetch::Idle,
+            pending_current_notes: None,
             revision: 0,
         }
     }
@@ -147,9 +191,10 @@ impl ReleaseChecks {
 
     pub(super) fn tick(&mut self, frequency: Option<CheckFrequency>) -> bool {
         let latest = self.poll_latest();
-        let history = self.poll_history();
+        let notes = self.poll_current_notes();
+        let expired = self.expire_feedback(Instant::now());
         let started = frequency.is_some_and(|frequency| self.check_if_due(frequency));
-        let changed = latest || history || started;
+        let changed = latest || notes || expired || started;
         if changed {
             self.revision += 1;
         }
@@ -166,7 +211,7 @@ impl ReleaseChecks {
             cache: self.cache.clone(),
             latest: self.latest,
             manual_feedback: self.manual_feedback,
-            history: self.history,
+            current_notes: self.current_notes,
             revision: self.revision,
         })
     }
@@ -174,14 +219,7 @@ impl ReleaseChecks {
     fn perform(&mut self, action: CheckAction) -> bool {
         let changed = match action {
             CheckAction::Check => self.check_latest(true),
-            CheckAction::Dismiss => {
-                let manual = self.manual_feedback;
-                let changed = self.dismiss_notice();
-                if changed {
-                    self.store();
-                }
-                changed || manual
-            }
+            CheckAction::Dismiss { tag } => self.dismiss_notice(tag),
             CheckAction::Seen => {
                 let changed = self.mark_seen();
                 if changed {
@@ -190,9 +228,11 @@ impl ReleaseChecks {
                 changed
             }
             CheckAction::Frequency(frequency) => self.check_if_due(frequency),
-            CheckAction::History { force } => {
-                (force || self.cache.history.is_none() && matches!(self.history, Fetch::Idle))
-                    && self.refresh_history()
+            CheckAction::Notes { force } => {
+                let current = (force || self.cache.current_release().is_none())
+                    && self.refresh_current_notes();
+                let latest = force && self.check_latest(false);
+                current || latest
             }
         };
         if changed {
@@ -218,7 +258,7 @@ impl ReleaseChecks {
         self.cache = snapshot.cache;
         self.latest = snapshot.latest;
         self.manual_feedback = snapshot.manual_feedback;
-        self.history = snapshot.history;
+        self.current_notes = snapshot.current_notes;
         self.revision = snapshot.revision;
         true
     }
@@ -258,6 +298,7 @@ impl ReleaseChecks {
             return false;
         }
         self.manual_feedback = manual;
+        self.feedback_deadline = None;
         self.cache.last_attempt = Some(Utc::now());
         let (send, receive) = std::sync::mpsc::sync_channel(1);
         match std::thread::Builder::new()
@@ -273,6 +314,7 @@ impl ReleaseChecks {
                 tracing::warn!(%error, "Unable to start the release check");
                 self.cache.last_error = Some(CheckError::Network);
                 self.latest = Fetch::Failed(CheckError::Network);
+                self.feedback_deadline = manual.then(|| Instant::now() + FEEDBACK_DURATION);
             }
         }
         self.store();
@@ -293,42 +335,47 @@ impl ReleaseChecks {
         self.latest = match result {
             Ok(release) => {
                 self.cache.last_success = Some(Utc::now());
-                let previous = self.cache.latest.replace(release);
-                if self.cache.current.is_none() {
-                    self.cache.current = previous.filter(Release::matches_current);
+                if release.matches_current() {
+                    self.cache.current = Some(release.clone());
+                } else if self.cache.current.is_none() {
+                    self.cache.current = self.cache.latest.take().filter(Release::matches_current);
                 }
+                self.cache.latest = Some(release);
                 Fetch::Idle
             }
             Err(error) => Fetch::Failed(error),
         };
+        self.feedback_deadline = self
+            .manual_feedback
+            .then(|| Instant::now() + FEEDBACK_DURATION);
         self.store();
         true
     }
 
-    fn refresh_history(&mut self) -> bool {
-        if matches!(self.history, Fetch::Pending) {
+    fn refresh_current_notes(&mut self) -> bool {
+        if matches!(self.current_notes, Fetch::Pending) {
             return false;
         }
         let (send, receive) = std::sync::mpsc::sync_channel(1);
         match std::thread::Builder::new()
-            .name("release-history".into())
+            .name("current-release-notes".into())
             .spawn(move || {
-                let _ = send.send(release_update::fetch_history());
+                let _ = send.send(release_update::fetch_current());
             }) {
             Ok(_) => {
-                self.pending_history = Some(receive);
-                self.history = Fetch::Pending;
+                self.pending_current_notes = Some(receive);
+                self.current_notes = Fetch::Pending;
             }
             Err(error) => {
-                tracing::warn!(%error, "Unable to start the release history check");
-                self.history = Fetch::Failed(CheckError::Network);
+                tracing::warn!(%error, "Unable to start the current release notes request");
+                self.current_notes = Fetch::Failed(CheckError::Network);
             }
         }
         true
     }
 
-    fn poll_history(&mut self) -> bool {
-        let Some(receive) = &self.pending_history else {
+    fn poll_current_notes(&mut self) -> bool {
+        let Some(receive) = &self.pending_current_notes else {
             return false;
         };
         let result = match receive.try_recv() {
@@ -336,10 +383,10 @@ impl ReleaseChecks {
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(CheckError::Network),
         };
-        self.pending_history = None;
-        self.history = match result {
-            Ok(releases) => {
-                self.cache.history = Some(releases);
+        self.pending_current_notes = None;
+        self.current_notes = match result {
+            Ok(release) => {
+                self.cache.current = Some(release);
                 self.store();
                 Fetch::Idle
             }
@@ -385,7 +432,11 @@ impl TrafficApp {
         match action {
             UpdateAction::Check => self.apply_check_action(CheckAction::Check, cx),
             UpdateAction::DismissNotice => {
-                self.apply_check_action(CheckAction::Dismiss, cx);
+                let tag = match self.updates.checks.read(cx).notice() {
+                    Some(Notice::Update(release)) => Some(release.tag().to_string()),
+                    _ => None,
+                };
+                self.apply_check_action(CheckAction::Dismiss { tag }, cx);
                 self.updates.notes_opener.focus(window);
             }
             UpdateAction::Frequency(frequency) => {
@@ -397,8 +448,11 @@ impl TrafficApp {
             }
             UpdateAction::OpenNotes => {
                 self.updates.notes_open = true;
+                self.updates
+                    .current_notes_scroll
+                    .set_offset(Point::default());
                 self.updates.notes_scroll.set_offset(Point::default());
-                self.apply_check_action(CheckAction::History { force: false }, cx);
+                self.apply_check_action(CheckAction::Notes { force: false }, cx);
                 self.updates.notes_controls[0].focus(window);
             }
             UpdateAction::CloseNotes => {
@@ -406,27 +460,72 @@ impl TrafficApp {
                 self.updates.notes_opener.focus(window);
             }
             UpdateAction::RefreshNotes => {
-                self.apply_check_action(CheckAction::History { force: true }, cx);
+                self.apply_check_action(CheckAction::Notes { force: true }, cx);
             }
             UpdateAction::OpenReleasePage => {
-                let url = self
-                    .updates
-                    .checks
-                    .read(cx)
+                let checks = self.updates.checks.read(cx);
+                let url = checks
                     .newer_release()
-                    .filter(|_| self.updates.download_url(cx).is_none())
+                    .or_else(|| checks.cache.current_release())
                     .map_or_else(
                         || release_update::RELEASES_PAGE.to_string(),
                         release_update::Release::page_url,
                     );
                 cx.open_url(&url);
             }
-            UpdateAction::Download => {
-                if let Some(url) = self.updates.download_url(cx) {
-                    cx.open_url(&url);
-                }
-            }
+            UpdateAction::Download => self.download_update(cx),
         }
+    }
+
+    fn download_update(&mut self, cx: &mut Context<Self>) {
+        if self.updates.installing {
+            return;
+        }
+        let Some(release) = self.updates.checks.read(cx).newer_release() else {
+            return;
+        };
+        let Some(url) = release.download_url(self.updates.portable) else {
+            return;
+        };
+        let portable = self.updates.portable;
+        let install_dir = self.updates.install_dir.clone();
+        if !portable && install_dir.is_none() {
+            cx.open_url(&url);
+            return;
+        }
+        let release = release.clone();
+        let data_dir = self.backend.dir.clone();
+        self.updates.install_error = None;
+        let (send, receive) = tokio::sync::oneshot::channel();
+        if let Err(error) = std::thread::Builder::new()
+            .name("update-installer".into())
+            .spawn(move || {
+                let result = match install_dir {
+                    Some(dir) => release_update::download_and_install(&release, &dir),
+                    None => release_update::portable::download_and_update(&release, &data_dir),
+                };
+                let _ = send.send(result);
+            })
+        {
+            tracing::warn!(%error, "Unable to start the installer download");
+            self.updates.install_error = Some("无法启动下载，请重试。".into());
+            return;
+        }
+        self.updates.installing = true;
+        cx.spawn(async move |this, cx| {
+            let result = receive
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("更新任务中断，请重试。")));
+            let _ = this.update(cx, |app, cx| {
+                app.updates.installing = false;
+                if let Err(error) = result {
+                    tracing::warn!(%error, "Unable to complete the update installation");
+                    app.updates.install_error = Some(error.to_string());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn update_note_actions(&self, cx: &App) -> [Option<UpdateAction>; 4] {
@@ -434,9 +533,7 @@ impl TrafficApp {
             Some(UpdateAction::CloseNotes),
             Some(UpdateAction::RefreshNotes),
             Some(UpdateAction::OpenReleasePage),
-            self.updates
-                .download_url(cx)
-                .is_some()
+            (!self.updates.installing && self.updates.download_url(cx).is_some())
                 .then_some(UpdateAction::Download),
         ]
     }
@@ -539,10 +636,38 @@ impl TrafficApp {
                 )
         });
         column()
+            .min_w_0()
+            .max_w_full()
+            .ml_auto()
             .gap(px(4.))
             .items_end()
-            .child(check)
-            .child(row().gap(px(8.)).children(notice).child(notes.flex_none()))
+            .child(row().gap(px(8.)).children(notice).child(check))
+            .child(
+                row()
+                    .gap(px(8.))
+                    .when(
+                        self.updates.installing || self.updates.download_url(cx).is_some(),
+                        |d| {
+                            d.child(
+                                Button::new("about-download-update")
+                                    .label(self.updates.download_label())
+                                    .custom(self.update_button_style(p.accent_text, cx))
+                                    .disabled(self.updates.installing)
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.act(Action::Update(UpdateAction::Download), window, cx);
+                                    })),
+                            )
+                        },
+                    )
+                    .child(notes.flex_none()),
+            )
+            .when_some(self.updates.install_error.as_ref(), |d, error| {
+                d.child(
+                    label(error.clone(), p.amber)
+                        .text_size(px(12.))
+                        .whitespace_normal(),
+                )
+            })
     }
 
     pub(super) fn update_frequency_row(&self, cx: &Context<Self>) -> Div {
@@ -591,61 +716,70 @@ impl TrafficApp {
                 })
             };
         let checks = state.checks.read(cx);
-        let releases: Vec<_> = checks
+        let current_notes = checks
             .cache
-            .releases()
-            .map(|release| {
-                (
-                    release.tag().to_string(),
-                    release.matches_current(),
-                    release.notes_html().to_string(),
-                )
-            })
-            .collect();
-        let message = match checks.history {
-            Fetch::Pending => Some("正在获取发行记录…"),
+            .current_release()
+            .map(|release| release.notes_html().to_string())
+            .unwrap_or_default();
+        let newer = checks
+            .newer_release()
+            .map(|release| (release.tag().to_string(), release.notes_html().to_string()));
+        let message = match checks.current_notes {
+            Fetch::Pending => Some("正在获取当前版本说明…"),
+            Fetch::Failed(CheckError::Unavailable) if current_notes.is_empty() => {
+                Some("当前版本暂无发行说明。")
+            }
             Fetch::Failed(error) => Some(error.message()),
-            Fetch::Idle if releases.is_empty() => Some("暂无更新说明。"),
             Fetch::Idle => None,
         };
-        let body =
-            column()
-                .gap(px(16.))
+        let mut version_notes = |tag: &str, notes: String, message: Option<&str>| {
+            let section = column()
                 .min_w_0()
+                .gap(px(8.))
+                .child(heading(tag.to_string(), p))
                 .when_some(message, |d, message| {
-                    d.child(label(message, p.muted).whitespace_normal())
+                    d.child(label(message.to_string(), p.muted).whitespace_normal())
+                });
+            if notes.trim().is_empty() {
+                section.when(message.is_none(), |d| {
+                    d.child(label("该版本暂无更新说明。", p.muted))
                 })
-                .children(releases.into_iter().enumerate().map(
-                    |(index, (tag, current, notes))| {
-                        column()
-                            .min_w_0()
-                            .gap(px(8.))
-                            .when(index != 0, |d| d.child(settings_separator(p)))
-                            .child(
-                                row()
-                                    .gap(px(8.))
-                                    .child(heading(tag.clone(), p))
-                                    .when(current, |d| {
-                                        d.child(label("当前版本", p.muted).text_size(px(12.)))
-                                    }),
-                            )
-                            .when(notes.trim().is_empty(), |d| {
-                                d.child(label("该版本暂无更新说明。", p.muted))
-                            })
-                            .when(!notes.trim().is_empty(), |d| {
-                                d.child(
-                                    TextView::html(
-                                        SharedString::from(format!("about-release-notes-{}", tag)),
-                                        notes,
-                                        window,
-                                        cx,
-                                    )
-                                    .text_color(rgb(p.text)),
-                                )
-                            })
-                    },
-                ));
+            } else {
+                section.child(
+                    TextView::html(
+                        SharedString::from(format!("about-release-notes-{tag}")),
+                        notes,
+                        window,
+                        cx,
+                    )
+                    .text_color(rgb(p.text)),
+                )
+            }
+        };
+        let current = version_notes(
+            concat!("v", env!("CARGO_PKG_VERSION")),
+            current_notes,
+            message,
+        );
+        let newer = newer.map(|(tag, notes)| version_notes(&tag, notes, None));
+        let has_update = newer.is_some();
         let viewport = window.viewport_size();
+        let panel = |title, id, scroll: &ScrollHandle, body| {
+            column()
+                .min_w_0()
+                .gap(px(10.))
+                .child(heading(title, p))
+                .child(
+                    div()
+                        .id(id)
+                        .min_w_0()
+                        .h((viewport.height - px(280.)).clamp(px(80.), px(430.)))
+                        .overflow_x_hidden()
+                        .overflow_y_scroll()
+                        .track_scroll(scroll)
+                        .child(body),
+                )
+        };
         Some(
             div()
                 .id("update-notes-overlay")
@@ -663,27 +797,55 @@ impl TrafficApp {
                         .id("update-notes-dialog")
                         .bg(popup_surface(p))
                         .shadow_md()
-                        .w((viewport.width - px(48.)).min(px(660.)))
+                        .w(
+                            (viewport.width - px(48.)).min(px(if has_update {
+                                920.
+                            } else {
+                                660.
+                            })),
+                        )
                         .gap(px(12.))
                         .child(
                             row()
                                 .justify_between()
-                                .child(heading("更新内容", p))
+                                .child(heading("版本说明", p))
                                 .children(button(0, "about-notes-close", "关闭", false, cx)),
                         )
                         .child(settings_separator(p))
                         .child(
-                            div()
-                                .id("about-notes-scroll")
-                                .w_full()
-                                .min_w_0()
-                                .h((viewport.height - px(250.)).clamp(px(80.), px(430.)))
-                                .overflow_x_hidden()
-                                .overflow_y_scroll()
-                                .track_scroll(&state.notes_scroll)
-                                .child(body),
+                            stretch()
+                                .gap(px(16.))
+                                .child(
+                                    panel(
+                                        "当前版本",
+                                        "about-current-notes",
+                                        &state.current_notes_scroll,
+                                        current,
+                                    )
+                                    .when(has_update, |d| d.flex_none().w(relative(0.34)))
+                                    .when(!has_update, |d| d.flex_1()),
+                                )
+                                .when_some(newer, |d, notes| {
+                                    d.child(div().w(px(1.)).flex_none().bg(surface_border(p)))
+                                        .child(
+                                            panel(
+                                                "更新内容",
+                                                "about-notes-scroll",
+                                                &state.notes_scroll,
+                                                notes,
+                                            )
+                                            .flex_1(),
+                                        )
+                                }),
                         )
                         .child(settings_separator(p))
+                        .when_some(state.install_error.as_ref(), |d, error| {
+                            d.child(
+                                label(error.clone(), p.amber)
+                                    .text_size(px(12.))
+                                    .whitespace_normal(),
+                            )
+                        })
                         .child(
                             row()
                                 .justify_end()
@@ -696,7 +858,16 @@ impl TrafficApp {
                                     false,
                                     cx,
                                 ))
-                                .children(button(3, "about-notes-download", "下载更新", true, cx)),
+                                .children(button(
+                                    3,
+                                    "about-notes-download",
+                                    state.download_label(),
+                                    true,
+                                    cx,
+                                ))
+                                .when(state.installing, |d| {
+                                    d.child(label(state.download_label(), p.muted))
+                                }),
                         ),
                 ),
         )
@@ -758,8 +929,9 @@ impl TrafficApp {
                     "cached result was not distinguished from a failed check"
                 );
                 checks.latest = Fetch::Idle;
+                let tag = checks.newer_release().unwrap().tag().to_string();
                 anyhow::ensure!(
-                    checks.dismiss_notice()
+                    checks.dismiss_notice(Some(tag))
                         && checks.notice().is_none()
                         && checks.cache.unread_update().is_none(),
                     "dismissed update remained visible"
@@ -786,10 +958,12 @@ impl TrafficApp {
         );
         let checks = self.updates.checks.read(cx);
         anyhow::ensure!(
-            checks.cache.releases().any(Release::matches_current)
-                && checks.cache.releases().count() == 3
-                && matches!(checks.history, Fetch::Idle),
-            "cached history or current notes were not available offline"
+            checks
+                .cache
+                .current_release()
+                .is_some_and(Release::matches_current)
+                && matches!(checks.current_notes, Fetch::Idle),
+            "cached current notes were not available offline"
         );
         self.handle_update_action(UpdateAction::CloseNotes, window, cx);
         anyhow::ensure!(
@@ -800,19 +974,99 @@ impl TrafficApp {
     }
 
     #[cfg(test)]
-    pub(super) fn verify_update_dialog_layout(&self, window: &Window) -> anyhow::Result<()> {
+    pub(super) fn set_fixture_latest_release(
+        &self,
+        release: Option<Release>,
+        cx: &mut Context<Self>,
+    ) -> Option<Release> {
+        self.updates.checks.update(cx, |checks, cx| {
+            cx.notify();
+            std::mem::replace(&mut checks.cache.latest, release)
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_update_dialog_layout(
+        &self,
+        window: &Window,
+        has_update: bool,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.updates.notes_controls[0].is_focused(window),
             "dialog did not focus its close control"
         );
         anyhow::ensure!(
+            self.updates.notes_scroll.max_offset().width <= px(1.)
+                && self.updates.current_notes_scroll.max_offset().width <= px(1.),
+            "notes overflowed horizontally"
+        );
+        if !has_update {
+            anyhow::ensure!(
+                self.updates.current_notes_scroll.bounds().size.width > px(500.)
+                    && self.updates.notes_scroll.bounds().size.width == px(0.),
+                "current-only notes still reserved a column for another release"
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
             self.updates.notes_scroll.max_offset().height > px(0.),
             "long update notes did not scroll"
         );
         anyhow::ensure!(
-            self.updates.notes_scroll.max_offset().width <= px(1.),
-            "notes overflowed horizontally"
+            self.updates.current_notes_scroll.bounds().right()
+                < self.updates.notes_scroll.bounds().left(),
+            "current and new release notes were not side by side"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn manual_check_feedback_expires_without_dismissing_a_known_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut checks = ReleaseChecks::new(dir.path().to_path_buf());
+        let current: Release = serde_json::from_value(serde_json::json!({
+            "tag": concat!("v", env!("CARGO_PKG_VERSION")), "notes": "", "installer": true, "portable": true
+        })).unwrap();
+        let mut newer = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        newer.patch += 1;
+        let newer: Release = serde_json::from_value(serde_json::json!({
+            "tag": format!("v{newer}"), "notes": "", "installer": true, "portable": true
+        }))
+        .unwrap();
+        for (cached, result) in [(None, Ok(current)), (Some(newer), Err(CheckError::Network))] {
+            checks.cache.latest = cached;
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            checks.manual_feedback = true;
+            checks.latest = Fetch::Pending;
+            checks.pending_latest = Some(receive);
+            let started = Instant::now();
+            assert!(!checks.tick(None) && checks.notice().is_none());
+            assert!(checks.feedback_deadline.is_none());
+            assert!(send.send(result).is_ok());
+            assert!(checks.tick(None));
+            let deadline = checks.feedback_deadline.unwrap();
+            assert!(deadline >= started + Duration::from_secs(30));
+            assert!(matches!(
+                checks.notice(),
+                Some(Notice::Result("已是最新版") | Notice::Failed(CheckError::Network))
+            ));
+            assert!(!checks.expire_feedback(deadline - Duration::from_millis(1)));
+            let revision = checks.revision();
+            checks.feedback_deadline = Some(Instant::now());
+            assert!(checks.tick(None));
+            assert_eq!(checks.revision(), revision + 1);
+            assert!(!checks.snapshot(revision).unwrap().manual_feedback);
+            if checks.newer_release().is_some() {
+                assert!(matches!(checks.notice(), Some(Notice::Update(_))));
+                assert!(checks.cache.dismissed_tag.is_none());
+            } else {
+                assert!(checks.notice().is_none());
+            }
+        }
     }
 }

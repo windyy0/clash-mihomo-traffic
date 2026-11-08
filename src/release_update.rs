@@ -1,14 +1,17 @@
 use chrono::{DateTime, Months, TimeDelta, TimeZone, Utc};
 use semver::Version;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::BTreeMap, io::Read, path::Path, sync::OnceLock, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::{io::Read, path::Path, sync::OnceLock, time::Duration};
+
+mod installer;
+pub(crate) mod portable;
+pub use installer::download_and_install;
 
 pub const RELEASES_PAGE: &str = "https://github.com/windyy0/clash-mihomo-traffic/releases";
 pub const CACHE_FILE: &str = "update-cache.json";
 const API: &str = "https://api.github.com/repos/windyy0/clash-mihomo-traffic/releases";
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const MAX_RESPONSE: usize = 512 * 1024;
-const MAX_HISTORY_PAGE: usize = 8 * 1024 * 1024;
 const MAX_CACHE: u64 = 64 * 1024 * 1024;
 const MAX_NOTES: usize = 32 * 1024;
 
@@ -86,11 +89,22 @@ struct GitHubRelease {
     assets: Vec<GitHubAsset>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct GitHubAsset {
     name: String,
     state: String,
     browser_download_url: String,
+    digest: Option<String>,
+}
+
+impl GitHubRelease {
+    fn matching_asset(&self, version: &Version, portable: bool) -> Option<&GitHubAsset> {
+        let name = asset_name(version, portable);
+        let url = format!("{RELEASES_PAGE}/download/{}/{name}", self.tag_name);
+        self.assets.iter().find(|asset| {
+            asset.name == name && asset.state == "uploaded" && asset.browser_download_url == url
+        })
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -114,15 +128,8 @@ impl Release {
         if release.draft || release.prerelease {
             return Err(CheckError::Invalid);
         }
-        let has_asset = |portable| {
-            let name = asset_name(&version, portable);
-            let url = format!("{RELEASES_PAGE}/download/{}/{name}", release.tag_name);
-            release.assets.iter().any(|asset| {
-                asset.name == name && asset.state == "uploaded" && asset.browser_download_url == url
-            })
-        };
-        let installer = has_asset(false);
-        let portable = has_asset(true);
+        let installer = release.matching_asset(&version, false).is_some();
+        let portable = release.matching_asset(&version, true).is_some();
         let mut result = Self {
             tag: release.tag_name,
             notes: release.body.unwrap_or_default(),
@@ -265,7 +272,6 @@ fn current() -> Version {
 pub struct Cache {
     pub latest: Option<Release>,
     pub current: Option<Release>,
-    pub history: Option<Vec<Release>>,
     pub last_attempt: Option<DateTime<Utc>>,
     pub last_success: Option<DateTime<Utc>>,
     pub last_error: Option<CheckError>,
@@ -273,27 +279,32 @@ pub struct Cache {
     pub dismissed_tag: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct CacheFile {
+    #[serde(flatten)]
+    cache: Cache,
+    history: Option<Vec<Release>>,
+}
+
 impl Cache {
     pub fn load(dir: &Path) -> Self {
         let Ok(file) = std::fs::File::open(dir.join(CACHE_FILE)) else {
             return Self::default();
         };
-        let mut cache: Self = serde_json::from_reader(file.take(MAX_CACHE)).unwrap_or_default();
+        let Ok(CacheFile { mut cache, history }) = serde_json::from_reader(file.take(MAX_CACHE))
+        else {
+            return Self::default();
+        };
         cache.latest = cache
             .latest
             .filter(|release| Release::parse_tag(&release.tag).is_some());
-        cache.current = cache
-            .current
-            .filter(|release| Release::parse_tag(&release.tag).is_some());
-        if let Some(history) = &mut cache.history {
-            history.retain(|release| Release::parse_tag(&release.tag).is_some());
+        cache.current = cache.current.filter(Release::matches_current);
+        // Recover only the installed version's notes from an older cache file.
+        if cache.current_release().is_none() {
+            cache.current =
+                history.and_then(|history| history.into_iter().find(Release::matches_current));
         }
-        for release in cache
-            .latest
-            .iter_mut()
-            .chain(cache.current.iter_mut())
-            .chain(cache.history.iter_mut().flatten())
-        {
+        for release in cache.latest.iter_mut().chain(cache.current.iter_mut()) {
             release.limit_notes();
         }
         cache
@@ -313,16 +324,12 @@ impl Cache {
         Ok(())
     }
 
-    pub fn releases(&self) -> impl Iterator<Item = &Release> {
-        // A completed history refresh takes precedence over older single-release entries.
-        self.current
-            .iter()
-            .chain(self.latest.iter())
-            .chain(self.history.iter().flatten())
-            .filter_map(|release| Some((Release::parse_tag(release.tag())?, release)))
-            .collect::<BTreeMap<_, _>>()
-            .into_values()
-            .rev()
+    pub fn current_release(&self) -> Option<&Release> {
+        self.current.as_ref().or_else(|| {
+            self.latest
+                .as_ref()
+                .filter(|release| release.matches_current())
+        })
     }
 
     pub fn unread_update(&self) -> Option<&Release> {
@@ -344,11 +351,16 @@ fn newer_than_tag(release: &Release, tag: Option<&str>) -> bool {
     })
 }
 
+fn github_client() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(concat!("MihomoTraffic/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+}
+
 fn fetch_with<T>(
     request: impl AsyncFnOnce(&reqwest::Client) -> Result<T, CheckError>,
 ) -> Result<T, CheckError> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("MihomoTraffic/", env!("CARGO_PKG_VERSION")))
+    let client = github_client()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(12))
         .build()
@@ -364,40 +376,30 @@ pub fn fetch_latest() -> Result<Release, CheckError> {
     fetch_with(async |client| request_latest(client, API).await)
 }
 
-pub fn fetch_history() -> Result<Vec<Release>, CheckError> {
+pub fn fetch_current() -> Result<Release, CheckError> {
     fetch_with(async |client| {
-        tokio::time::timeout(Duration::from_secs(45), request_history(client, API))
-            .await
-            .map_err(|_| CheckError::Network)?
+        Release::parse(request_tag(client, API, concat!("v", env!("CARGO_PKG_VERSION"))).await?)
     })
 }
 
 async fn request_latest(client: &reqwest::Client, api: &str) -> Result<Release, CheckError> {
-    let (release, _) = get_json(client.get(format!("{api}/latest")), MAX_RESPONSE).await?;
+    let release = get_release(client.get(format!("{api}/latest"))).await?;
     Release::parse(release)
 }
 
-async fn request_history(client: &reqwest::Client, api: &str) -> Result<Vec<Release>, CheckError> {
-    let mut releases = Vec::new();
-    for page in 1.. {
-        let request = client.get(api).query(&[("per_page", 20), ("page", page)]);
-        let (batch, next): (Vec<GitHubRelease>, _) = get_json(request, MAX_HISTORY_PAGE).await?;
-        releases.extend(
-            batch
-                .into_iter()
-                .filter_map(|release| Release::parse(release).ok()),
-        );
-        if !next {
-            break;
-        }
+async fn request_tag(
+    client: &reqwest::Client,
+    api: &str,
+    tag: &str,
+) -> Result<GitHubRelease, CheckError> {
+    let release = get_release(client.get(format!("{api}/tags/{tag}"))).await?;
+    if release.tag_name != tag || release.draft || release.prerelease {
+        return Err(CheckError::Invalid);
     }
-    Ok(releases)
+    Ok(release)
 }
 
-async fn get_json<T: DeserializeOwned>(
-    request: reqwest::RequestBuilder,
-    max_bytes: usize,
-) -> Result<(T, bool), CheckError> {
+async fn get_release(request: reqwest::RequestBuilder) -> Result<GitHubRelease, CheckError> {
     let mut response = request
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
@@ -409,29 +411,14 @@ async fn get_json<T: DeserializeOwned>(
         403 | 429 => return Err(CheckError::RateLimited),
         _ => return Err(CheckError::Network),
     }
-    // Use the pagination relation, while constructing requests against our fixed endpoint.
-    let next = response
-        .headers()
-        .get_all(reqwest::header::LINK)
-        .iter()
-        .filter_map(|link| link.to_str().ok())
-        .flat_map(|link| link.split(','))
-        .any(|link| {
-            link.split_once('>').is_some_and(|(_, relation)| {
-                relation
-                    .split(';')
-                    .any(|part| part.trim() == "rel=\"next\"")
-            })
-        });
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| CheckError::Network)? {
-        if chunk.len() > max_bytes - bytes.len() {
+        if chunk.len() > MAX_RESPONSE - bytes.len() {
             return Err(CheckError::Invalid);
         }
         bytes.extend_from_slice(&chunk);
     }
-    let value = serde_json::from_slice(&bytes).map_err(|_| CheckError::Invalid)?;
-    Ok((value, next))
+    serde_json::from_slice(&bytes).map_err(|_| CheckError::Invalid)
 }
 
 #[cfg(test)]

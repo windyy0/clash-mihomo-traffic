@@ -30,17 +30,26 @@ impl Drop for Instance {
         }
     }
 }
-pub fn single_instance() -> Result<Option<Instance>> {
+pub(crate) const DESKTOP_MUTEX_NAME: &str = "Local\\MihomoTrafficDesktop";
+
+pub(crate) fn try_instance(name: &str) -> Result<Option<Instance>> {
     unsafe {
-        let h = CreateMutexW(null(), 0, wide("Local\\MihomoTrafficDesktop").as_ptr());
+        let h = CreateMutexW(null(), 0, wide(name).as_ptr());
         anyhow::ensure!(!h.is_null(), "无法创建单实例锁");
         if GetLastError() == ERROR_ALREADY_EXISTS {
             CloseHandle(h);
-            super::taskbar::request_app_open();
             return Ok(None);
         }
         Ok(Some(Instance(h)))
     }
+}
+
+pub fn single_instance() -> Result<Option<Instance>> {
+    let instance = try_instance(DESKTOP_MUTEX_NAME)?;
+    if instance.is_none() {
+        super::taskbar::request_app_open();
+    }
+    Ok(instance)
 }
 
 #[cfg(test)]

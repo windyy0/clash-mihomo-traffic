@@ -100,6 +100,19 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
                 anyhow::ensure!(std::fs::read(custom.join("existing.sqlite3"))? == b"keep original", "changing the directory moved existing backups");
                 Ok(())
             })??;
+            let latest = this.update_in(cx, |app, window, cx| {
+                window.resize(size(px(900.), px(700.)));
+                let latest = app.set_fixture_latest_release(None, cx);
+                app.act(Action::Update(updates::UpdateAction::OpenNotes), window, cx);
+                latest
+            })?;
+            Timer::after(Duration::from_millis(180)).await;
+            this.update_in(cx, |app, window, cx| {
+                app.verify_update_dialog_layout(window, false)?;
+                app.act(Action::Update(updates::UpdateAction::CloseNotes), window, cx);
+                app.set_fixture_latest_release(latest, cx);
+                Ok::<_, anyhow::Error>(())
+            })??;
             for (color_theme, theme) in [
                 (ColorTheme::CloudBlue, "light"),
                 (ColorTheme::CloudBlue, "dark"),
@@ -130,7 +143,7 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
                                 anyhow::ensure!(app.connection_test_scroll.max_offset().width <= px(1.), "horizontal overflow: {theme} {width} {} expanded={expanded}", section.label());
                                 anyhow::ensure!(!app.can_restore_backup(cx), "layout fixture must never arm restore");
                                 if section == SettingsSection::About && expanded {
-                                    app.verify_update_dialog_layout(window)?;
+                                    app.verify_update_dialog_layout(window, true)?;
                                 }
                                 Ok(())
                             })??;

@@ -153,7 +153,7 @@ pub struct ProxyApplication {
     pub identity: String,
 }
 
-fn process_executable(pid: u32) -> Option<std::path::PathBuf> {
+pub(super) fn process_executable(pid: u32) -> Option<std::path::PathBuf> {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if process.is_null() {
