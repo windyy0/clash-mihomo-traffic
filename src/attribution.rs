@@ -17,7 +17,7 @@ pub struct Owner {
     pub label: String,
     pub icon: String,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Attribution {
     pub owner: Owner,
     pub pid: u32,

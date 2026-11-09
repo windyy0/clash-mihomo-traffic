@@ -78,7 +78,11 @@ pub struct Connection {
     pub chains: Vec<String>,
     #[serde(default)]
     pub rule: String,
-    #[serde(skip)]
+    // Locally resolved ownership travels from the collector to the desktop UI.
+    #[serde(
+        rename = "_mihomoTrafficAttribution",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub attribution: Option<crate::attribution::Attribution>,
 }
 impl Connection {

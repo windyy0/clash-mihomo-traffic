@@ -747,3 +747,66 @@ impl std::ops::DerefMut for UiBackend {
             .expect("fixture requires an in-process backend")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{InterfaceUpdate, Poll, receive, send};
+    use crate::{
+        app_activity::application_activity,
+        attribution::{Attribution, Owner},
+        config::Config,
+        model::{Bytes, Connection, Metadata, Shared},
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn poll_preserves_live_application_attribution() {
+        let process = r"C:\Runtime\msedgewebview2.exe";
+        let host = r"C:\Windows\SystemApps\SearchHost.exe";
+        let owner = Owner {
+            key: host.into(),
+            label: "SearchHost.exe".into(),
+            icon: host.into(),
+        };
+        let rate = Bytes { up: 8, down: 16 };
+        let poll = Poll {
+            config: Config::default().into(),
+            state: Shared {
+                connected: true,
+                connections: Arc::new(vec![Connection {
+                    metadata: Metadata {
+                        process_path: process.into(),
+                        ..Default::default()
+                    },
+                    attribution: Some(Attribution {
+                        owner: owner.clone(),
+                        pid: 42,
+                    }),
+                    ..Default::default()
+                }]),
+                app_rates: [(process.into(), rate)].into(),
+                application_rates: [(host.into(), rate)].into(),
+                identities: [(host.into(), owner.clone())].into(),
+                ..Default::default()
+            },
+            analysis_generation: 0,
+            process_generation: 0,
+            update: InterfaceUpdate::default(),
+        };
+
+        let mut frame = Vec::new();
+        send(&mut frame, &poll).unwrap();
+        let received: Poll = receive(&mut frame.as_slice()).unwrap().unwrap();
+
+        let apps = application_activity(&received.state);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].key, host);
+        assert_eq!(apps[0].connections, 1);
+        assert_eq!(apps[0].rate, rate);
+        let connection = &received.state.connections[0];
+        assert_eq!(connection.app(), process);
+        let attribution = connection.attribution.as_ref().unwrap();
+        assert_eq!(attribution.owner, owner);
+        assert_eq!(attribution.pid, 42);
+    }
+}
