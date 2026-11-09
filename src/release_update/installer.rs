@@ -1,4 +1,4 @@
-use super::{API, CheckError, Release, fetch_with, github_client, request_tag};
+use super::{API, CheckError, Release, UpdateProgress, fetch_with, github_client, request_tag};
 use anyhow::{Context, Result, anyhow, ensure};
 use sha2::{Digest, Sha256};
 use std::{
@@ -6,18 +6,23 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub(super) const MAX_PACKAGE: usize = 256 * 1024 * 1024;
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-pub fn download_and_install(release: &Release, install_dir: &Path) -> Result<()> {
+pub(crate) fn download_and_install(
+    release: &Release,
+    install_dir: &Path,
+    progress: impl FnMut(UpdateProgress),
+) -> Result<()> {
     let downloads = dirs::download_dir().context("无法找到系统下载目录。")?;
     let dir = tempfile::Builder::new()
         .prefix("MihomoTraffic-")
         .tempdir_in(downloads)
         .context("无法在系统下载目录中保存安装包。")?;
-    let setup = download_package(release, false, dir.path())?;
+    let setup = download_package(release, false, dir.path(), progress)?;
     // Inno Setup stops the running app after the user confirms the installation.
     let mut target = std::ffi::OsString::from("/DIR=");
     target.push(install_dir);
@@ -35,7 +40,12 @@ pub fn download_and_install(release: &Release, install_dir: &Path) -> Result<()>
     Ok(())
 }
 
-pub(super) fn download_package(release: &Release, portable: bool, dir: &Path) -> Result<PathBuf> {
+pub(super) fn download_package(
+    release: &Release,
+    portable: bool,
+    dir: &Path,
+    mut progress: impl FnMut(UpdateProgress),
+) -> Result<PathBuf> {
     ensure!(release.is_newer(), "只能安装较新的版本。");
     let tag = release.tag();
     let version = Release::parse_tag(tag).context("无法识别更新版本。")?;
@@ -83,12 +93,21 @@ pub(super) fn download_package(release: &Release, portable: bool, dir: &Path) ->
                 }))
                 .build()
                 .context("无法启动更新包下载。")?;
-            download_verified(&client, &asset.browser_download_url, expected, &mut file).await
+            download_verified(
+                &client,
+                &asset.browser_download_url,
+                expected,
+                asset.size,
+                &mut file,
+                &mut progress,
+            )
+            .await
         })?;
     drop(file);
 
     let package = dir.join(asset.name);
     std::fs::rename(partial, &package).context("无法保存校验后的更新包。")?;
+    progress(UpdateProgress::Applying);
     Ok(package)
 }
 
@@ -96,7 +115,9 @@ pub(super) async fn download_verified(
     client: &reqwest::Client,
     url: &str,
     expected: &str,
+    asset_size: Option<u64>,
     file: &mut File,
+    mut progress: impl FnMut(UpdateProgress),
 ) -> Result<()> {
     let mut response = client
         .get(url)
@@ -105,22 +126,40 @@ pub(super) async fn download_verified(
         .and_then(reqwest::Response::error_for_status)
         .map_err(reqwest::Error::without_url)
         .context("下载更新包失败，请检查网络后重试。")?;
+    let total = response
+        .content_length()
+        .or(asset_size)
+        .filter(|size| (1..=MAX_PACKAGE as u64).contains(size));
+    let mut report = |received| {
+        progress(UpdateProgress::Downloading {
+            received,
+            total: total.filter(|&size| received <= size),
+        });
+    };
     let mut hash = Sha256::new();
-    let mut length = 0;
+    let mut received = 0;
+    report(received);
+    let mut reported_at = Instant::now();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(reqwest::Error::without_url)
         .context("更新包下载中断，请重试。")?
     {
-        length += chunk.len();
-        ensure!(length <= MAX_PACKAGE, "更新包超出大小限制。");
+        received += chunk.len() as u64;
+        ensure!(received <= MAX_PACKAGE as u64, "更新包超出大小限制。");
         file.write_all(&chunk).context("写入更新包失败。")?;
         hash.update(&chunk);
+        let now = Instant::now();
+        if now.duration_since(reported_at) >= PROGRESS_INTERVAL {
+            report(received);
+            reported_at = now;
+        }
     }
     ensure!(
-        length != 0 && format!("{:x}", hash.finalize()).eq_ignore_ascii_case(expected),
+        received != 0 && format!("{:x}", hash.finalize()).eq_ignore_ascii_case(expected),
         "更新包校验失败，请重新下载。"
     );
+    report(received);
     Ok(())
 }

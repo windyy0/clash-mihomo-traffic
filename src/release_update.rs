@@ -5,7 +5,7 @@ use std::{io::Read, path::Path, sync::OnceLock, time::Duration};
 
 mod installer;
 pub(crate) mod portable;
-pub use installer::download_and_install;
+pub(crate) use installer::download_and_install;
 
 pub const RELEASES_PAGE: &str = "https://github.com/windyy0/clash-mihomo-traffic/releases";
 pub const CACHE_FILE: &str = "update-cache.json";
@@ -14,6 +14,13 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const MAX_RESPONSE: usize = 512 * 1024;
 const MAX_CACHE: u64 = 64 * 1024 * 1024;
 const MAX_NOTES: usize = 32 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateProgress {
+    Connecting,
+    Downloading { received: u64, total: Option<u64> },
+    Applying,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -95,6 +102,7 @@ struct GitHubAsset {
     state: String,
     browser_download_url: String,
     digest: Option<String>,
+    size: Option<u64>,
 }
 
 impl GitHubRelease {

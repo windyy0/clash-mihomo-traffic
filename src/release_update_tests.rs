@@ -39,9 +39,13 @@ async fn fixture_api(
             let headers = std::str::from_utf8(&headers).unwrap();
             assert!(headers.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
             assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+            let length = if extra_headers.contains("Transfer-Encoding: chunked") {
+                String::new()
+            } else {
+                format!("Content-Length: {}\r\n", body.len())
+            };
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n{body}",
-                body.len()
+                "HTTP/1.1 {status}\r\n{length}Connection: close\r\n{extra_headers}\r\n{body}"
             );
             connection.write_all(response.as_bytes()).await.unwrap();
         }
@@ -152,23 +156,53 @@ fn retains_only_current_notes_from_a_legacy_history_cache() {
 
 #[tokio::test]
 async fn installer_download_requires_the_published_sha256() {
+    let chunked = || {
+        (
+            "/releases/setup.exe",
+            "200 OK",
+            "3\r\nabc\r\n0\r\n\r\n".into(),
+            "Transfer-Encoding: chunked\r\n",
+        )
+    };
     let (api, server) = fixture_api(vec![
         ("/releases/setup.exe", "200 OK", "abc".into(), ""),
+        chunked(),
+        chunked(),
         ("/releases/setup.exe", "200 OK", "abd".into(), ""),
     ])
     .await;
     let url = format!("{api}/setup.exe");
     let hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     let client = fixture_client();
-    let mut file = tempfile::NamedTempFile::new().unwrap();
-    installer::download_verified(&client, &url, hash, file.as_file_mut())
+    for (asset_size, total) in [(None, Some(3)), (Some(3), Some(3)), (None, None)] {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let mut reports = Vec::new();
+        installer::download_verified(
+            &client,
+            &url,
+            hash,
+            asset_size,
+            file.as_file_mut(),
+            |value| {
+                reports.push(value);
+            },
+        )
         .await
         .unwrap();
-    assert_eq!(std::fs::read(file.path()).unwrap(), b"abc");
+        assert_eq!(std::fs::read(file.path()).unwrap(), b"abc");
+        assert_eq!(
+            reports.first(),
+            Some(&UpdateProgress::Downloading { received: 0, total })
+        );
+        assert_eq!(
+            reports.last(),
+            Some(&UpdateProgress::Downloading { received: 3, total })
+        );
+    }
 
     let mut file = tempfile::tempfile().unwrap();
     assert!(
-        installer::download_verified(&client, &url, hash, &mut file)
+        installer::download_verified(&client, &url, hash, None, &mut file, |_| {})
             .await
             .is_err()
     );

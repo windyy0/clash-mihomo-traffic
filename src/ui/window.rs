@@ -864,7 +864,10 @@ impl WindowState {
 
 impl TrafficApp {
     fn window_work_pending(&self) -> bool {
-        self.migration_busy || self.hotkey_pending.is_some() || self.backup_directory_busy
+        self.migration_busy
+            || self.hotkey_pending.is_some()
+            || self.backup_directory_busy
+            || self.updates.installing()
     }
 
     fn save_window_state(&self, window: &Window, resume: &Cell<Option<WindowState>>) {

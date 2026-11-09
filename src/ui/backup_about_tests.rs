@@ -129,6 +129,14 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
                                 app.act(Action::Theme(theme), window, cx);
                                 app.act(Action::SettingsSection(section), window, cx);
                                 app.about_details_open = expanded;
+                                app.set_fixture_update_progress((section == SettingsSection::About && width == 900.).then(|| {
+                                    use crate::release_update::UpdateProgress;
+                                    if expanded {
+                                        UpdateProgress::Downloading { received: 4_194_304, total: Some(8_388_608) }
+                                    } else {
+                                        UpdateProgress::Connecting
+                                    }
+                                }));
                                 app.config.backup_dir = expanded.then(|| format!(r"D:\{}\备份目录", "long-backup-directory-".repeat(14)));
                                 if section == SettingsSection::Backup {
                                     app.restore_path.update(cx, |s, cx| s.set_value(if expanded { format!(r"D:\{}\流量备份.sqlite3", "long-backup-path-".repeat(12)) } else { String::new() }, window, cx));
@@ -181,6 +189,10 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
                     println!("backup/about layouts passed: {color_theme:?} {theme} {width}x700");
                 }
             }
+            this.update_in(cx, |app, _, cx| {
+                app.set_fixture_update_progress(None);
+                cx.notify();
+            })?;
             println!("backup/about checks passed: confirmation reset, update notes scroll and keyboard, 32 layouts");
             let hold = std::env::var("MIHOMO_BACKUP_ABOUT_QA_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
             if hold > 0 {
