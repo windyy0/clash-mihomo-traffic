@@ -57,6 +57,7 @@ fn content_sized_picker(id: &str) -> bool {
             | "analysis-bucket"
             | "seconds-time-unit"
             | "storage-clean-range"
+            | "update-check-frequency"
     )
 }
 
@@ -410,6 +411,7 @@ impl TrafficApp {
                 | "connections-sort"
                 | "history-range"
                 | "history-annual-scope"
+                | "update-check-frequency"
         );
         div()
             .id(id)

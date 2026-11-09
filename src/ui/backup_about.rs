@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const ABOUT_APP_CARD_GROUP: &str = "about-app-card";
+
 fn about_fact(title: &str, summary: &str, detail: &str, p: Palette) -> Div {
     row()
         .items_start()
@@ -296,15 +298,17 @@ impl TrafficApp {
     pub(super) fn about_settings(&self, cx: &Context<Self>) -> Div {
         let p = self.p;
         column().gap(px(16.))
-            .child(self.card().gap(px(12.))
-                .child(row().items_start().justify_between().flex_wrap()
+            .child(self.card().group(ABOUT_APP_CARD_GROUP).gap(px(12.))
+                .child(row().gap(px(10.))
                     .child(row().gap(px(14.)).flex_none()
                         .child(img("images/traffic.png").size(px(44.)).flex_none())
                         .child(column().gap(px(1.)).items_start().whitespace_nowrap()
                             .child(heading("流量监控", p).text_size(px(20.)).line_height(px(24.)))
-                            .child(label(concat!("v", env!("CARGO_PKG_VERSION")), p.muted)
-                                .text_size(px(12.))
-                                .line_height(px(16.)))))
+                            .child(row().gap(px(8.))
+                                .child(label(concat!("v", env!("CARGO_PKG_VERSION")), p.muted)
+                                    .text_size(px(12.))
+                                    .line_height(px(16.)))
+                                .child(self.update_notes_link(cx)))))
                     .child(self.update_header_actions(cx)))
                 .child(settings_separator(p))
                 .child(self.update_frequency_row(cx)))

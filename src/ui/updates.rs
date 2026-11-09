@@ -71,6 +71,8 @@ pub(super) struct State {
     install_dir: Option<std::path::PathBuf>,
     installing: bool,
     install_error: Option<String>,
+    #[cfg(test)]
+    check_button_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl State {
@@ -91,6 +93,8 @@ impl State {
             },
             installing: false,
             install_error: None,
+            #[cfg(test)]
+            check_button_bounds: Rc::new(Cell::new(Bounds::default())),
         }
     }
 
@@ -581,6 +585,29 @@ impl TrafficApp {
             .active(state_surface(p).into())
     }
 
+    pub(super) fn update_notes_link(&self, cx: &Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id("about-update-notes")
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(20.))
+            .cursor_pointer()
+            .text_size(px(12.))
+            .text_color(rgb(p.accent_text))
+            .opacity(0.)
+            .group_hover(backup_about::ABOUT_APP_CARD_GROUP, |d| d.opacity(1.))
+            .hover(|d| d.underline())
+            .child("更新内容")
+            .track_focus(&self.updates.notes_opener)
+            .tab_index(0)
+            .when(self.keyboard_navigation, |d| d.focus(|d| d.underline()))
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.act(Action::Update(UpdateAction::OpenNotes), window, cx);
+            }))
+    }
+
     pub(super) fn update_header_actions(&self, cx: &Context<Self>) -> Div {
         let p = self.p;
         let checks = self.updates.checks.read(cx);
@@ -596,25 +623,17 @@ impl TrafficApp {
             .on_click(cx.listener(|app, _, window, cx| {
                 app.act(Action::Update(UpdateAction::Check), window, cx)
             }));
-        let notes = div()
-            .id("about-update-notes")
-            .flex()
-            .items_center()
-            .h(px(28.))
-            .px(px(8.))
-            .cursor_pointer()
-            .text_size(px(13.))
-            .text_color(rgb(p.muted))
-            .hover(move |d| d.text_color(rgb(p.accent_text)))
-            .child("更新内容")
-            .track_focus(&self.updates.notes_opener)
-            .tab_index(0)
-            .when(self.keyboard_navigation, |d| {
-                d.focus(move |d| d.text_color(rgb(p.accent_text)).underline())
-            })
-            .on_click(cx.listener(|app, _, window, cx| {
-                app.act(Action::Update(UpdateAction::OpenNotes), window, cx);
-            }));
+        #[cfg(test)]
+        let check = {
+            let bounds = self.updates.check_button_bounds.clone();
+            row().relative().flex_none().child(check).child(
+                canvas(move |rect, _, _| bounds.set(rect), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+        };
         let notice = checks.notice().map(|notice| {
             let (text, color) = match notice {
                 Notice::Update(release) => (format!("发现新版本 {}", release.tag()), p.accent_text),
@@ -636,14 +655,15 @@ impl TrafficApp {
                 )
         });
         column()
+            .flex_1()
             .min_w_0()
-            .max_w_full()
-            .ml_auto()
             .gap(px(4.))
             .items_end()
-            .child(row().gap(px(8.)).children(notice).child(check))
             .child(
                 row()
+                    .w_full()
+                    .flex_wrap()
+                    .justify_end()
                     .gap(px(8.))
                     .when(
                         self.updates.installing || self.updates.download_url(cx).is_some(),
@@ -659,7 +679,8 @@ impl TrafficApp {
                             )
                         },
                     )
-                    .child(notes.flex_none()),
+                    .children(notice)
+                    .child(check),
             )
             .when_some(self.updates.install_error.as_ref(), |d, error| {
                 d.child(
@@ -674,24 +695,23 @@ impl TrafficApp {
         let frequency = self.config.update_check_frequency;
         row()
             .justify_between()
+            .gap(px(12.))
             .child(label("检查频率", self.p.text))
             .child(
-                div().w(px(132.)).child(
-                    self.taskbar_picker(
-                        "update-check-frequency",
-                        frequency.label().into(),
-                        CheckFrequency::ALL
-                            .into_iter()
-                            .map(|choice| {
-                                (
-                                    choice.label().into(),
-                                    Action::Update(UpdateAction::Frequency(choice)),
-                                    choice == frequency,
-                                )
-                            })
-                            .collect(),
-                        cx,
-                    ),
+                self.taskbar_picker(
+                    "update-check-frequency",
+                    frequency.label().into(),
+                    CheckFrequency::ALL
+                        .into_iter()
+                        .map(|choice| {
+                            (
+                                choice.label().into(),
+                                Action::Update(UpdateAction::Frequency(choice)),
+                                choice == frequency,
+                            )
+                        })
+                        .collect(),
+                    cx,
                 ),
             )
     }
@@ -983,6 +1003,17 @@ impl TrafficApp {
             cx.notify();
             std::mem::replace(&mut checks.cache.latest, release)
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_update_controls_alignment(&self) -> anyhow::Result<()> {
+        let button = self.updates.check_button_bounds.get();
+        let frequency = self.picker_bounds["update-check-frequency"].get();
+        anyhow::ensure!(
+            button.size.width > px(0.) && (button.right() - frequency.right()).abs() <= px(1.),
+            "check button and frequency picker right edges differ: {button:?}, {frequency:?}"
+        );
+        Ok(())
     }
 
     #[cfg(test)]

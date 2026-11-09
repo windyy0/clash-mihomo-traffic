@@ -527,6 +527,19 @@ impl TrafficApp {
             &self.open_hotkey_error
         };
         let recording = self.hotkey_recording;
+        let status = if recording {
+            Some("正在录制，按 Esc 取消".into())
+        } else if pending {
+            Some("正在注册快捷键…".into())
+        } else if self.hotkey_draft != self.config.open_hotkey || !error.is_empty() {
+            Some(if self.data.open_hotkey_active.is_empty() {
+                "当前没有可用的全局快捷键".into()
+            } else {
+                format!("当前可用：{}", self.data.open_hotkey_active)
+            })
+        } else {
+            None
+        };
         let text = if recording {
             "请按组合键…".into()
         } else {
@@ -636,21 +649,7 @@ impl TrafficApp {
                         .when(pending, |d| d.opacity(0.5)),
                     ),
             )
-            .child(
-                label(
-                    if recording {
-                        "正在录制，按 Esc 取消".into()
-                    } else if pending {
-                        "正在注册快捷键…".into()
-                    } else if self.data.open_hotkey_active.is_empty() {
-                        "当前没有可用的全局快捷键".into()
-                    } else {
-                        format!("当前可用：{}", self.data.open_hotkey_active)
-                    },
-                    p.muted,
-                )
-                .whitespace_normal(),
-            )
+            .children(status.map(|text| label(text, p.muted).whitespace_normal()))
             .when(!error.is_empty(), |d| {
                 d.child(label(error.clone(), p.amber).whitespace_normal())
             })

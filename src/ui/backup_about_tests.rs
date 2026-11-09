@@ -109,6 +109,7 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
             Timer::after(Duration::from_millis(180)).await;
             this.update_in(cx, |app, window, cx| {
                 app.verify_update_dialog_layout(window, false)?;
+                app.verify_update_controls_alignment()?;
                 app.act(Action::Update(updates::UpdateAction::CloseNotes), window, cx);
                 app.set_fixture_latest_release(latest, cx);
                 Ok::<_, anyhow::Error>(())
@@ -142,8 +143,16 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
                                 anyhow::ensure!(app.connection_test_scroll.bounds().size.height > px(0.), "settings viewport collapsed");
                                 anyhow::ensure!(app.connection_test_scroll.max_offset().width <= px(1.), "horizontal overflow: {theme} {width} {} expanded={expanded}", section.label());
                                 anyhow::ensure!(!app.can_restore_backup(cx), "layout fixture must never arm restore");
-                                if section == SettingsSection::About && expanded {
-                                    app.verify_update_dialog_layout(window, true)?;
+                                if section == SettingsSection::About {
+                                    app.verify_update_controls_alignment()?;
+                                    let frequency = app.picker_bounds["update-check-frequency"].get();
+                                    anyhow::ensure!(
+                                        (px(55.)..px(90.)).contains(&frequency.size.width),
+                                        "update frequency picker did not fit its label: {frequency:?}"
+                                    );
+                                    if expanded {
+                                        app.verify_update_dialog_layout(window, true)?;
+                                    }
                                 }
                                 Ok(())
                             })??;
