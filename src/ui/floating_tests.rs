@@ -108,23 +108,23 @@ pub(super) async fn exercise(
             let bounds=app.picker_bounds[id].get();
             anyhow::ensure!(bounds.size.width>px(0.)&&bounds.right()<=window.viewport_size().width,"floating toolbar control overflowed: {id}: {bounds:?}");
         }
-        let (_,_,width,height,dpi)=native::floating_bounds(app.float_hwnd);
+        let (_,_,width,height,dpi)=native::floating_bounds(app.floating.hwnd());
         let expected=(13.*24.+12.*8.+28.+2.*crate::floating_backdrop::SHADOW_MARGIN)*dpi as f32/96.;
         anyhow::ensure!(width>0 && (height as f32-expected.ceil()).abs()<=1.,"native floating window did not fit multiline content: {width}x{height}, expected height {expected}");
-        anyhow::ensure!(native::floating_client_size(app.float_hwnd) == (width, height), "floating client area still reserves a system border");
-        let original_position = native::position(app.float_hwnd);
+        anyhow::ensure!(native::floating_client_size(app.floating.hwnd()) == (width, height), "floating client area still reserves a system border");
+        let original_position = native::position(app.floating.hwnd());
         if let Some(saved) = app.config.floating_x.zip(app.config.floating_y) {
             anyhow::ensure!(original_position == saved, "floating startup did not restore the saved screen position");
         }
         let moved = (original_position.0 - 37, original_position.1 - 21);
-        native::setup_float(app.float_hwnd, moved.0, moved.1);
-        native::show(app.float_hwnd, true);
-        anyhow::ensure!(native::position(app.float_hwnd) == moved, "visible refresh reset floating position");
-        native::show(app.float_hwnd, false);
-        native::show(app.float_hwnd, true);
-        anyhow::ensure!(native::position(app.float_hwnd) == moved, "show after hide reset floating position");
-        native::setup_float(app.float_hwnd, original_position.0, original_position.1);
-        let floating = app.float_view.read(cx);
+        native::setup_float(app.floating.hwnd(), moved.0, moved.1);
+        native::show(app.floating.hwnd(), true);
+        anyhow::ensure!(native::position(app.floating.hwnd()) == moved, "visible refresh reset floating position");
+        native::show(app.floating.hwnd(), false);
+        native::show(app.floating.hwnd(), true);
+        anyhow::ensure!(native::position(app.floating.hwnd()) == moved, "show after hide reset floating position");
+        native::setup_float(app.floating.hwnd(), original_position.0, original_position.1);
+        let floating = app.floating.view.read(cx);
         anyhow::ensure!(floating.scroll.max_offset().width <= px(1.) && floating.scroll.max_offset().height <= px(1.), "floating content is clipped at its natural window size: {:?}", floating.scroll.max_offset());
         app.update_floating_background(true,cx);
         anyhow::ensure!(app.floating_background_error&&app.config.floating_background_color.is_none(),"invalid background input was applied");
@@ -143,7 +143,7 @@ pub(super) async fn exercise(
                 && app.config.floating_row_gap == 17,
             "floating appearance subscriptions failed"
         );
-        anyhow::ensure!(!app.float_view.read(cx).mica_active, "custom translucent background was overridden by Mica");
+        anyhow::ensure!(!app.floating.view.read(cx).mica_active, "custom translucent background was overridden by Mica");
         let viewport = app.editor.preview_scroll.bounds();
         let preview = app.editor.traffic_bounds.get();
         anyhow::ensure!(
@@ -263,13 +263,13 @@ pub(super) async fn exercise(
                         app.editor.settings_scroll.bounds().size.height > px(0.),
                         "floating settings collapsed while changing theme"
                     );
-                    let floating = app.float_view.read(cx);
-                    let (corner, region_size) = native::floating_corner_state(app.float_hwnd);
+                    let floating = app.floating.view.read(cx);
+                    let (corner, region_size) = native::floating_corner_state(app.floating.hwnd());
                     anyhow::ensure!(
                         region_size.is_none() && corner == 1,
                         "floating window still combines system and custom corner clipping"
                     );
-                    if let Some(backdrop) = native::floating_backdrop(app.float_hwnd) {
+                    if let Some(backdrop) = native::floating_backdrop(app.floating.hwnd()) {
                         anyhow::ensure!(
                             backdrop == 1,
                             "native floating backdrop differs from rendered material: {backdrop}"
@@ -295,8 +295,8 @@ pub(super) async fn exercise(
         })?;
         Timer::after(Duration::from_millis(100)).await;
         this.update_in(cx, |app, _, _| {
-            let (corner, region) = native::floating_corner_state(app.float_hwnd);
-            let (width, height) = native::floating_client_size(app.float_hwnd);
+            let (corner, region) = native::floating_corner_state(app.floating.hwnd());
+            let (width, height) = native::floating_client_size(app.floating.hwnd());
             anyhow::ensure!(
                 region.is_none() && corner == 1 && width > 0 && height > 0,
                 "floating material clipping changed while resizing: {region:?}, {width}x{height}"
@@ -331,7 +331,7 @@ pub(super) async fn exercise(
     Timer::after(Duration::from_millis(700)).await;
     this.update_in(cx, |app, _, cx| {
         anyhow::ensure!(
-            !app.float_view.read(cx).mica_active,
+            !app.floating.view.read(cx).mica_active,
             "fully transparent background still has a Mica backdrop"
         );
         anyhow::ensure!(
@@ -372,11 +372,11 @@ pub(super) async fn exercise(
         Timer::after(Duration::from_millis(250)).await;
         this.update_in(cx, |app, _, _| {
             let (x, y, underlay_width, underlay_height, _) = native::floating_bounds(underlay_hwnd);
-            let (_, _, width, height, dpi) = native::floating_bounds(app.float_hwnd);
+            let (_, _, width, height, dpi) = native::floating_bounds(app.floating.hwnd());
             let scale = dpi as f32 / 96.;
             let margin = (crate::floating_backdrop::SHADOW_MARGIN * scale).round() as i32;
             native::fit_float(
-                app.float_hwnd,
+                app.floating.hwnd(),
                 width as f32 / scale,
                 height as f32 / scale,
                 native::FloatPosition::Saved(
@@ -384,11 +384,11 @@ pub(super) async fn exercise(
                     y + (underlay_height - height) / 2 + margin,
                 ),
             );
-            native::show_composition_fixture(underlay_hwnd, app.float_hwnd);
+            native::show_composition_fixture(underlay_hwnd, app.floating.hwnd());
         })?;
         Timer::after(Duration::from_millis(150)).await;
         this.update_in(cx, |app, _, _| {
-            let native::FloatingComposition {outside, corners, inside, halo, far_shadow: shadow} = native::floating_composited_colors(app.float_hwnd)?;
+            let native::FloatingComposition {outside, corners, inside, halo, far_shadow: shadow} = native::floating_composited_colors(app.floating.hwnd())?;
             let distance = |a: u32, b: u32| [0, 8, 16].into_iter()
                 .map(|shift| (((a >> shift) & 255) as i32 - ((b >> shift) & 255) as i32).abs())
                 .max().unwrap();
@@ -412,20 +412,21 @@ pub(super) async fn exercise(
             anyhow::ensure!(halo.into_iter().all(|color| (1..=12).contains(&distance(color, outside)))
                 && halo.into_iter().all(|color| distance(color, halo[0]) <= 2),
                 "floating {mode} halo is missing, too strong or directional: {halo:x?}, outside={outside:06x}");
-            let (_, _, _, _, dpi) = native::floating_bounds(app.float_hwnd);
+            let (_, _, _, _, dpi) = native::floating_bounds(app.floating.hwnd());
             println!("Floating {mode} halo at {dpi} DPI: {halo:06x?}");
             Ok(())
         })??;
         let mut material_colors = Vec::new();
         for source in [0xA05090, 0x5090A0] {
             this.update_in(cx, |app, _, cx| {
-                app.float_view
+                app.floating
+                    .view
                     .read(cx)
                     .test_mica_source(source, mode == "dark")
             })??;
             Timer::after(Duration::from_millis(250)).await;
             material_colors.push(this.update_in(cx, |app, _, _| {
-                native::floating_composited_colors(app.float_hwnd).map(|sample| sample.inside)
+                native::floating_composited_colors(app.floating.hwnd()).map(|sample| sample.inside)
             })??);
         }
         let difference = [0, 8, 16]

@@ -31,7 +31,7 @@ impl Interface {
         updates: Arc<Mutex<ReleaseChecks>>,
         resume: Option<WindowState>,
     ) -> Result<Self> {
-        let session = Arc::new(Session::new(resume));
+        let session = Arc::new(Session::new(resume)?);
         let mut interface = Self {
             child: Command::new(executable)
                 .args(["--desktop-ui", launch.argument()])
@@ -81,12 +81,21 @@ pub fn run_interface_process(mode: Option<&str>) -> Result<()> {
         Some("floating") => Launch::Floating,
         _ => anyhow::bail!("界面启动参数无效"),
     };
-    let (backend, resume, initial_checks) = UiBackend::connect()?;
+    let (backend, resume, initial_checks, wake) = UiBackend::connect()?;
     let mut checks = ReleaseChecks::mirror(backend.dir.clone());
     if let Some(snapshot) = initial_checks {
         checks.apply_snapshot(snapshot);
     }
-    run_interface(backend, launch, resume, checks, InterfaceEvents::Remote)
+    run_interface(
+        backend,
+        launch,
+        resume,
+        checks,
+        InterfaceEvents::Remote {
+            wake: Arc::new(wake),
+            first_poll: true,
+        },
+    )
 }
 
 pub fn run_desktop(backend: Backend) -> Result<()> {
@@ -268,8 +277,8 @@ mod tests {
             WaitForSingleObject,
         },
         UI::WindowsAndMessaging::{
-            FindWindowExW, GetWindowThreadProcessId, HWND_MESSAGE, IsWindow, PostMessageW,
-            WM_CLOSE, WM_COMMAND,
+            FindWindowExW, GetWindowThreadProcessId, HWND_MESSAGE, IsIconic, IsWindow,
+            PostMessageW, SW_MINIMIZE, ShowWindowAsync, WM_CLOSE, WM_COMMAND, WM_LBUTTONUP,
         },
     };
 
@@ -388,12 +397,14 @@ mod tests {
                             "the shell did not enable the floating window",
                         )?;
                     }
+                    let opened = Instant::now();
                     anyhow::ensure!(unsafe { PostMessageW(shell, WM_COMMAND, 1, 0) } != 0);
                     let (main, pid, process) = wait_for(
                         || child_dashboard(own_pid),
                         "the shell did not open the dashboard",
                     )?;
                     anyhow::ensure!(pid != previous_pid);
+                    println!("open cycle {cycle}: visible in {:?}", opened.elapsed());
                     previous_pid = pid;
                     previous_query = wait_for(
                         || {
@@ -403,6 +414,24 @@ mod tests {
                         },
                         "the interface did not complete its query in the collector",
                     )?;
+                    if cycle == 0 {
+                        unsafe { ShowWindowAsync(main, SW_MINIMIZE) };
+                        wait_for(
+                            || (unsafe { IsIconic(main) } != 0).then_some(()),
+                            "the dashboard did not minimize",
+                        )?;
+                        let restored = Instant::now();
+                        anyhow::ensure!(
+                            unsafe {
+                                PostMessageW(shell, crate::tray::CALLBACK, 0, WM_LBUTTONUP as isize)
+                            } != 0
+                        );
+                        wait_for(
+                            || (unsafe { IsIconic(main) } == 0).then_some(()),
+                            "the open event did not restore the dashboard",
+                        )?;
+                        println!("open minimized dashboard: {:?}", restored.elapsed());
+                    }
                     anyhow::ensure!(unsafe { PostMessageW(main, WM_CLOSE, 0, 0) } != 0);
                     if floating {
                         wait_for(

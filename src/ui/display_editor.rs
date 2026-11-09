@@ -576,7 +576,7 @@ impl TrafficApp {
             DisplayAction::ResetFloat => {
                 self.config.floating_x = None;
                 self.config.floating_y = None;
-                self.float_view.update(cx, |view, cx| {
+                self.floating.view.update(cx, |view, cx| {
                     view.reset_position();
                     cx.notify();
                 });
@@ -642,9 +642,17 @@ impl TrafficApp {
     pub(super) fn refresh_floating(&mut self, cx: &mut Context<Self>) {
         let visible = self.config.floating
             && !(self.config.fullscreen_hide && native::fullscreen_foreground());
-        native::show(self.float_hwnd, visible);
+        let hwnd = if self.config.floating {
+            self.floating.open(&self.config, cx)
+        } else {
+            self.floating.hwnd()
+        };
+        if hwnd == 0 {
+            return;
+        }
+        native::show(hwnd, visible);
         let palette = self.floating_palette();
-        self.float_view.update(cx, |view, cx| {
+        self.floating.view.update(cx, |view, cx| {
             view.palette = palette;
             if !self.config.floating {
                 view.clear_appearance();

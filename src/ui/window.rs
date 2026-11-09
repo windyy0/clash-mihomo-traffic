@@ -1,6 +1,10 @@
 use super::assets::UiAssets;
 use super::*;
 use gpui_component::{Root, ThemeMode, TitleBar, scroll::ScrollbarShow};
+use std::{
+    os::windows::io::{AsRawHandle, OwnedHandle},
+    sync::Arc,
+};
 
 pub(super) fn apply_theme(
     p: Palette,
@@ -80,8 +84,7 @@ impl TrafficApp {
     fn new(
         backend: UiBackend,
         checks: Entity<updates::ReleaseChecks>,
-        float_view: Entity<Floating>,
-        float_hwnd: isize,
+        floating: Rc<FloatingWindow>,
         resume: Rc<Cell<Option<WindowState>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -455,6 +458,7 @@ impl TrafficApp {
         history_state.month_sequence = sequence;
         let mut analysis = analysis_page::AnalysisState::new(window, cx);
         analysis.next_id = sequence;
+        let data = backend.snapshot();
         let mut app = Self {
             #[cfg(test)]
             connection_test_scroll: ScrollHandle::new(),
@@ -537,7 +541,7 @@ impl TrafficApp {
             pending_query: None,
             unsent_detail_query: None,
             pending_detail_query: None,
-            data: Shared::default(),
+            data,
             live_chart_view: chart::LiveChart::new(cx),
             search,
             page_number,
@@ -576,8 +580,7 @@ impl TrafficApp {
             last_search: String::new(),
             main_hwnd: h,
             deferred_close: Cell::new(false),
-            float_hwnd,
-            float_view,
+            floating,
             #[cfg(test)]
             _window_queries: query_task,
             _subscriptions: vec![
@@ -883,57 +886,63 @@ impl TrafficApp {
     }
 }
 
+pub(super) struct FloatingWindow {
+    pub(super) view: Entity<Floating>,
+    hwnd: Cell<isize>,
+}
+
+impl FloatingWindow {
+    pub(super) fn hwnd(&self) -> isize {
+        self.hwnd.get()
+    }
+
+    pub(super) fn open(&self, config: &Config, cx: &mut App) -> isize {
+        if self.hwnd() != 0 {
+            return self.hwnd();
+        }
+        let view = self.view.clone();
+        let x = config.floating_x.unwrap_or(0);
+        let y = config.floating_y.unwrap_or(0);
+        let hwnd = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(x as f32), px(y as f32)),
+                        size(px(270.), px(84.)),
+                    ))),
+                    titlebar: None,
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    focus: false,
+                    show: false,
+                    is_resizable: false,
+                    is_minimizable: false,
+                    ..Default::default()
+                },
+                move |_, _| view,
+            )
+            .expect("无法创建悬浮窗")
+            .update(cx, |_, window, _| {
+                let hwnd = native::hwnd(window);
+                native::setup_float(hwnd, x, y);
+                hwnd
+            })
+            .expect("悬浮窗初始化失败");
+        self.hwnd.set(hwnd);
+        hwnd
+    }
+}
+
 struct Desktop {
     backend: UiBackend,
     checks: Entity<updates::ReleaseChecks>,
     main: Option<WindowHandle<Root>>,
-    floating: Option<(Entity<Floating>, isize)>,
+    floating: Rc<FloatingWindow>,
     resume: Rc<Cell<Option<WindowState>>>,
     floating_wallpaper: Option<WallpaperWatcher>,
     next_periodic: Instant,
-    components_initialized: bool,
 }
 
 impl Desktop {
-    fn open_floating(&mut self, config: &Config, cx: &mut App) -> (Entity<Floating>, isize) {
-        if !self.components_initialized {
-            gpui_component::init(cx);
-            self.components_initialized = true;
-        }
-        // Once a GPUI window exists, keep the small floating window available.
-        // GPUI 0.2.2 on Windows exits its event loop when the last window closes.
-        self.floating
-            .get_or_insert_with(|| {
-                let backend = self.backend.clone();
-                let x = config.floating_x.unwrap_or(0);
-                let y = config.floating_y.unwrap_or(0);
-                cx.open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                            point(px(x as f32), px(y as f32)),
-                            size(px(270.), px(84.)),
-                        ))),
-                        titlebar: None,
-                        window_background: WindowBackgroundAppearance::Transparent,
-                        focus: false,
-                        show: false,
-                        is_resizable: false,
-                        is_minimizable: false,
-                        ..Default::default()
-                    },
-                    move |_, cx| cx.new(|_| Floating::new(backend)),
-                )
-                .expect("无法创建悬浮窗")
-                .update(cx, |_, window, cx| {
-                    let hwnd = native::hwnd(window);
-                    native::setup_float(hwnd, x, y);
-                    (cx.entity(), hwnd)
-                })
-                .expect("悬浮窗初始化失败")
-            })
-            .clone()
-    }
-
     fn with_main(
         &mut self,
         cx: &mut App,
@@ -963,7 +972,7 @@ impl Desktop {
         }) {
             return;
         }
-        let (float_view, float_hwnd) = self.open_floating(&self.backend.config_snapshot(), cx);
+        let floating = self.floating.clone();
         let backend = self.backend.clone();
         let checks = self.checks.clone();
         let resume = self.resume.clone();
@@ -984,9 +993,8 @@ impl Desktop {
                     ..Default::default()
                 },
                 move |window, cx| {
-                    let view = cx.new(|cx| {
-                        TrafficApp::new(backend, checks, float_view, float_hwnd, resume, window, cx)
-                    });
+                    let view =
+                        cx.new(|cx| TrafficApp::new(backend, checks, floating, resume, window, cx));
                     if let Some(previous) = previous.filter(|_| !overview) {
                         view.update(cx, |app, cx| {
                             app.navigate(previous.page, window, cx);
@@ -1094,8 +1102,8 @@ impl Desktop {
             return;
         }
         let config = self.backend.config_snapshot();
-        let was_open = self.floating.is_some();
-        let (view, hwnd) = self.open_floating(&config, cx);
+        let was_open = self.floating.hwnd() != 0;
+        let hwnd = self.floating.open(&config, cx);
         if !was_open {
             return;
         }
@@ -1113,7 +1121,7 @@ impl Desktop {
                 wallpaper.request(hwnd);
             }
             wallpaper.poll();
-            view.update(cx, |view, cx| {
+            self.floating.view.update(cx, |view, cx| {
                 view.palette =
                     Palette::new(config.color_theme, dark).with_wallpaper_accent(wallpaper.color());
                 cx.notify();
@@ -1170,7 +1178,10 @@ pub(super) fn run(backend: Backend) -> anyhow::Result<()> {
 }
 
 pub(super) enum InterfaceEvents {
-    Remote,
+    Remote {
+        wake: Arc<OwnedHandle>,
+        first_poll: bool,
+    },
     #[cfg(test)]
     Local(tokio::sync::mpsc::UnboundedReceiver<UiEvent>),
 }
@@ -1181,13 +1192,25 @@ impl InterfaceEvents {
         backend: &UiBackend,
         cx: &AsyncApp,
         revision: u64,
-    ) -> anyhow::Result<Option<bridge::InterfaceUpdate>> {
+    ) -> anyhow::Result<bridge::InterfaceUpdate> {
         match self {
-            Self::Remote => {
-                Timer::after(Duration::from_millis(500)).await;
+            Self::Remote { wake, first_poll } => {
+                use windows_sys::Win32::{
+                    Foundation::WAIT_FAILED, System::Threading::WaitForSingleObject,
+                };
+
+                let timeout = if std::mem::take(first_poll) { 0 } else { 500 };
                 let backend = backend.clone();
+                let wake = wake.clone();
                 cx.background_executor()
-                    .spawn(async move { backend.poll(revision) })
+                    .spawn(async move {
+                        if unsafe { WaitForSingleObject(wake.as_raw_handle(), timeout) }
+                            == WAIT_FAILED
+                        {
+                            return Err(std::io::Error::last_os_error().into());
+                        }
+                        backend.poll(revision)
+                    })
                     .await
             }
             #[cfg(test)]
@@ -1198,10 +1221,10 @@ impl InterfaceEvents {
                     }
                     _ = Timer::after(Duration::from_millis(500)) => Vec::new(),
                 };
-                Ok(Some(bridge::InterfaceUpdate {
+                Ok(bridge::InterfaceUpdate {
                     events,
                     checks: None,
-                }))
+                })
             }
         }
     }
@@ -1219,15 +1242,19 @@ pub(super) fn run_interface(
     Application::new()
         .with_assets(UiAssets)
         .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            let floating = Rc::new(FloatingWindow {
+                view: cx.new(|_| Floating::new(backend.clone())),
+                hwnd: Cell::new(0),
+            });
             let mut desktop = Desktop {
                 checks: cx.new(|_| checks),
                 backend,
                 main: None,
-                floating: None,
+                floating,
                 resume: Rc::new(Cell::new(resume)),
                 floating_wallpaper: None,
                 next_periodic: Instant::now(),
-                components_initialized: false,
             };
             match launch {
                 Launch::Main => desktop.open_main(false, cx),
@@ -1237,8 +1264,7 @@ pub(super) fn run_interface(
             cx.spawn(async move |cx| {
                 while let Ok(revision) = cx.update(|cx| desktop.checks.read(cx).revision()) {
                     let update = match events.receive(&desktop.backend, cx, revision).await {
-                        Ok(Some(update)) => update,
-                        Ok(None) => continue,
+                        Ok(update) => update,
                         Err(reason) => {
                             *error.borrow_mut() = Some(reason);
                             let _ = cx.update(|cx| cx.quit());

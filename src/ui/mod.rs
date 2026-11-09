@@ -259,8 +259,7 @@ pub struct TrafficApp {
     last_search: String,
     main_hwnd: isize,
     deferred_close: Cell<bool>,
-    float_hwnd: isize,
-    float_view: Entity<Floating>,
+    floating: Rc<window::FloatingWindow>,
     #[cfg(test)]
     _window_queries: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -673,12 +672,13 @@ impl TrafficApp {
 
         let visible = self.config.floating
             && !(self.config.fullscreen_hide && native::fullscreen_foreground());
-        native::show(self.float_hwnd, visible);
         if visible {
             self.refresh_floating(cx);
+        } else {
+            native::show(self.floating.hwnd(), false);
         }
         if self.tick.is_multiple_of(10) && visible {
-            let (x, y) = native::position(self.float_hwnd);
+            let (x, y) = native::position(self.floating.hwnd());
             if (Some(x), Some(y)) != (self.config.floating_x, self.config.floating_y) {
                 self.config.floating_x = Some(x);
                 self.config.floating_y = Some(y);

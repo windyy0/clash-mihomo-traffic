@@ -577,8 +577,8 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
             if std::env::var_os("MIHOMO_SPEED_ONLY").is_some(){return speed_tests::exercise(&this,cx).await;}
             this.update_in(cx, |app, window, cx| {
                 anyhow::ensure!(
-                    app.tick == 0 && !native::visible(app.float_hwnd),
-                    "disabled floating window flashed before the first visibility update"
+                    app.tick == 0 && app.floating.hwnd() == 0,
+                    "a native floating window was created while disabled"
                 );
                 app.act(Action::Nav(Page::Apps), window, cx);
                 anyhow::ensure!(

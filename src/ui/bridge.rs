@@ -17,12 +17,16 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     io::{self, BufRead, BufReader, BufWriter, Write},
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, OpenEventW, SYNCHRONIZATION_SYNCHRONIZE, SetEvent,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -106,23 +110,35 @@ impl From<WireConfig> for Config {
     }
 }
 
-#[derive(Default)]
 pub(super) struct Session {
     pub(super) sequence: u64,
     pub(super) quit: AtomicBool,
     events: Mutex<Vec<UiEvent>>,
     pub(super) resume: Mutex<Option<WindowState>>,
     pub(super) ready: AtomicBool,
+    wake_name: String,
+    wake: OwnedHandle,
 }
 
 impl Session {
-    pub(super) fn new(resume: Option<WindowState>) -> Self {
+    pub(super) fn new(resume: Option<WindowState>) -> Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self {
+        // The auto-reset event wakes the interface without occupying its request pipe.
+        let wake_name = format!(r"Local\MihomoTraffic.Interface.{}", uuid::Uuid::new_v4());
+        let wake =
+            unsafe { CreateEventW(std::ptr::null(), 0, 0, native::wide(&wake_name).as_ptr()) };
+        if wake.is_null() {
+            return Err(io::Error::last_os_error()).context("无法创建界面唤醒事件");
+        }
+        Ok(Self {
             sequence: NEXT.fetch_add(1, Ordering::Relaxed) << 32,
             resume: Mutex::new(resume),
-            ..Self::default()
-        }
+            quit: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
+            events: Mutex::new(Vec::new()),
+            wake_name,
+            wake: unsafe { OwnedHandle::from_raw_handle(wake) },
+        })
     }
 
     pub(super) fn take_events(&self) -> Vec<UiEvent> {
@@ -139,6 +155,7 @@ impl Session {
             return;
         }
         events.push(event);
+        unsafe { SetEvent(self.wake.as_raw_handle()) };
     }
 
     pub(super) fn serve(
@@ -197,6 +214,7 @@ impl Session {
                             &backend.dir,
                             self.sequence,
                             resume,
+                            &self.wake_name,
                             Self::poll(
                                 backend,
                                 InterfaceUpdate {
@@ -409,8 +427,12 @@ macro_rules! local {
 }
 
 impl UiBackend {
-    pub(super) fn connect() -> Result<(Self, Option<WindowState>, Option<CheckSnapshot>)> {
-        use std::os::windows::io::AsRawHandle;
+    pub(super) fn connect() -> Result<(
+        Self,
+        Option<WindowState>,
+        Option<CheckSnapshot>,
+        OwnedHandle,
+    )> {
         use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -425,8 +447,23 @@ impl UiBackend {
             input: BufReader::new(stdin),
             output: BufWriter::new(stdout),
         };
-        let (dir, sequence, resume, initial): (PathBuf, u64, Option<WindowState>, Poll) =
-            pipe.call(Request::Start)?;
+        let (dir, sequence, resume, wake_name, initial): (
+            PathBuf,
+            u64,
+            Option<WindowState>,
+            String,
+            Poll,
+        ) = pipe.call(Request::Start)?;
+        let wake = unsafe {
+            OpenEventW(
+                SYNCHRONIZATION_SYNCHRONIZE,
+                0,
+                native::wide(&wake_name).as_ptr(),
+            )
+        };
+        if wake.is_null() {
+            return Err(io::Error::last_os_error()).context("无法打开界面唤醒事件");
+        }
         Ok((
             Self {
                 dir,
@@ -441,6 +478,7 @@ impl UiBackend {
             },
             resume,
             initial.update.checks,
+            unsafe { OwnedHandle::from_raw_handle(wake) },
         ))
     }
 
@@ -497,10 +535,13 @@ impl UiBackend {
         result.map_err(anyhow::Error::msg)
     }
 
-    pub(super) fn poll(&self, known: u64) -> Result<Option<InterfaceUpdate>> {
-        let Ok(mut pipe) = self.pipe.as_ref().context("后台连接不可用")?.try_lock() else {
-            return Ok(None);
-        };
+    pub(super) fn poll(&self, known: u64) -> Result<InterfaceUpdate> {
+        let mut pipe = self
+            .pipe
+            .as_ref()
+            .context("后台连接不可用")?
+            .lock()
+            .unwrap();
         let poll: Poll = pipe.call(Request::Poll(known))?;
         *self.shared.lock().unwrap() = poll.state;
         *self.config.lock().unwrap() = poll.config.into();
@@ -508,7 +549,7 @@ impl UiBackend {
             .store(poll.analysis_generation, Ordering::Relaxed);
         self.process_generation
             .store(poll.process_generation, Ordering::Relaxed);
-        Ok(Some(poll.update))
+        Ok(poll.update)
     }
 
     pub(super) fn check_updates(&self, action: CheckAction, known: u64) -> Option<CheckSnapshot> {
@@ -750,14 +791,30 @@ impl std::ops::DerefMut for UiBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{InterfaceUpdate, Poll, receive, send};
+    use super::{InterfaceUpdate, Poll, Session, UiEvent, receive, send};
     use crate::{
         app_activity::application_activity,
         attribution::{Attribution, Owner},
         config::Config,
         model::{Bytes, Connection, Metadata, Shared},
     };
-    use std::sync::Arc;
+    use std::{os::windows::io::AsRawHandle, sync::Arc};
+    use windows_sys::Win32::{
+        Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::WaitForSingleObject,
+    };
+
+    #[test]
+    fn posting_an_open_event_signals_the_interface() {
+        let session = Session::new(None).unwrap();
+        let wait = || unsafe { WaitForSingleObject(session.wake.as_raw_handle(), 0) };
+
+        assert_eq!(wait(), WAIT_TIMEOUT);
+        session.post(UiEvent::Open);
+        assert_eq!(wait(), WAIT_OBJECT_0);
+        assert!(matches!(session.take_events().as_slice(), [UiEvent::Open]));
+        assert_eq!(wait(), WAIT_TIMEOUT);
+    }
 
     #[test]
     fn poll_preserves_live_application_attribution() {
