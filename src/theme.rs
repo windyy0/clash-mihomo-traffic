@@ -33,6 +33,23 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn light_switches_keep_a_white_thumb_with_readable_tracks() {
+        for theme in ColorTheme::ALL {
+            let palette = Palette::new(theme, false).with_wallpaper_accent(Some(0xf4c64a));
+            let (track, hover, thumb) = palette.switch_colors();
+            assert_eq!(thumb, 0xffffff);
+            assert!(contrast(track, thumb) >= 3.);
+            assert!(contrast(hover, thumb) >= 3.);
+        }
+
+        let mut palette = Palette::new(ColorTheme::Mica, false);
+        palette.accent = 0xbd7b65;
+        let (track, _, thumb) = palette.switch_colors();
+        assert_eq!(track, palette.accent);
+        assert_eq!(thumb, 0xffffff);
+    }
 }
 
 impl ColorTheme {
@@ -117,14 +134,14 @@ fn contrast(a: u32, b: u32) -> f64 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-fn readable_accent(color: u32, background: u32, text: u32) -> u32 {
+fn color_with_contrast(color: u32, background: u32, fallback: u32, minimum: f64) -> u32 {
     for percent in (0..=100).step_by(10) {
-        let candidate = mix(text, color, percent);
-        if contrast(candidate, background) >= 4.5 {
+        let candidate = mix(fallback, color, percent);
+        if contrast(candidate, background) >= minimum {
             return candidate;
         }
     }
-    text
+    fallback
 }
 
 /// Keep the wallpaper hue vivid enough for controls; resolve readable text separately.
@@ -272,7 +289,7 @@ impl Palette {
             && let Some(color) = color
         {
             self.accent = wallpaper_accent(color, self.dark, self.bg);
-            self.accent_text = readable_accent(self.accent, self.bg, self.text);
+            self.accent_text = color_with_contrast(self.accent, self.bg, self.text, 4.5);
             self.tint = mix(self.accent, self.bg, if self.dark { 18 } else { 12 });
         }
         self
@@ -295,12 +312,19 @@ impl Palette {
         mix(shade, self.accent, 10)
     }
 
-    pub fn switch_thumb(self) -> u32 {
-        if contrast(self.accent, 0xffffff).min(contrast(self.accent_hover(), 0xffffff)) >= 3. {
+    pub fn switch_colors(self) -> (u32, u32, u32) {
+        if !self.dark {
+            let track = color_with_contrast(self.accent, 0xffffff, 0, 3.);
+            return (track, mix(0, track, 10), 0xffffff);
+        }
+
+        let hover = self.accent_hover();
+        let thumb = if contrast(self.accent, 0xffffff).min(contrast(hover, 0xffffff)) >= 3. {
             0xffffff
         } else {
             0x202020
-        }
+        };
+        (self.accent, hover, thumb)
     }
 
     pub fn floating_window(mut self) -> Self {

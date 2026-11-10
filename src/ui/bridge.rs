@@ -32,6 +32,7 @@ use windows_sys::Win32::System::Threading::{
 #[derive(Serialize, Deserialize)]
 enum Request {
     Start,
+    Ping,
     Poll(u64),
     CheckUpdates(CheckAction, u64),
     Send(Command),
@@ -225,6 +226,7 @@ impl Session {
                         ),
                     )?;
                 }
+                Request::Ping => send(&mut out, &())?,
                 Request::Poll(known) => {
                     let checks = {
                         let mut updates = updates.lock().unwrap();
@@ -533,6 +535,10 @@ impl UiBackend {
         let (result, config): (std::result::Result<(), String>, WireConfig) = pipe.call(request)?;
         *self.config.lock().unwrap() = config.into();
         result.map_err(anyhow::Error::msg)
+    }
+
+    pub(super) fn ping(&self) -> Result<()> {
+        self.call(Request::Ping)
     }
 
     pub(super) fn poll(&self, known: u64) -> Result<InterfaceUpdate> {

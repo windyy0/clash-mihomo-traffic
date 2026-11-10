@@ -98,8 +98,13 @@ pub fn show(h: isize, visible: bool) {
 }
 pub fn foreground(h: isize) {
     unsafe {
-        ShowWindow(h as HWND, SW_RESTORE);
-        SetForegroundWindow(h as HWND);
+        let hwnd = h as HWND;
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        } else if IsWindowVisible(hwnd) == 0 {
+            ShowWindow(hwnd, SW_SHOW);
+        }
+        SetForegroundWindow(hwnd);
     }
 }
 pub fn set_app_icon(h: isize) {

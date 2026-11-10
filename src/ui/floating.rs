@@ -148,8 +148,9 @@ impl Floating {
     }
 
     pub(super) fn clear_appearance(&mut self) {
+        // The hidden window can reuse its composition target. Closing it during an
+        // in-flight commit from the last frame can crash DirectComposition.
         self.appearance = None;
-        self.backdrop = None;
         self.mica_active = false;
     }
 

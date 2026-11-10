@@ -10,6 +10,10 @@ use windows_sys::Win32::{
     System::{Pipes::GetNamedPipeServerProcessId, Registry::*, Threading::*},
 };
 
+pub fn trim_working_set() {
+    unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
+}
+
 /// A directly opened Inno uninstaller holds its uninstall log until it exits.
 /// Continue with the confirmed choice after that process has released the log.
 pub fn continue_uninstall(parent: u32, filename: &str, remove_data: bool) -> Result<()> {

@@ -86,6 +86,7 @@ impl TrafficApp {
         checks: Entity<updates::ReleaseChecks>,
         floating: Rc<FloatingWindow>,
         resume: Rc<Cell<Option<WindowState>>>,
+        visibility: Rc<Cell<MainVisibility>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -410,7 +411,8 @@ impl TrafficApp {
         let close_backend = backend.clone();
         let close_view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
-            if close_backend.config.lock().unwrap().close_to_tray {
+            let close_to_tray = close_backend.config.lock().unwrap().close_to_tray;
+            if close_to_tray {
                 if let Some(view) = close_view.upgrade() {
                     let app = view.read(cx);
                     if app.window_work_pending() {
@@ -418,10 +420,11 @@ impl TrafficApp {
                         native::show(h, false);
                         return false;
                     }
-                    app.save_window_state(window, &resume);
+                    app.finish_close_to_tray(window, &resume, &visibility);
+                } else {
+                    close_backend.set_hotkey_recording(false);
+                    window.remove_window();
                 }
-                close_backend.set_hotkey_recording(false);
-                window.remove_window();
                 false
             } else {
                 close_backend.exit();
@@ -870,6 +873,18 @@ impl TrafficApp {
             || self.updates.installing()
     }
 
+    fn finish_close_to_tray(
+        &self,
+        window: &Window,
+        resume: &Cell<Option<WindowState>>,
+        visibility: &Cell<MainVisibility>,
+    ) {
+        self.save_window_state(window, resume);
+        self.backend.set_hotkey_recording(false);
+        visibility.set(MainVisibility::Hidden);
+        native::show(self.main_hwnd, false);
+    }
+
     fn save_window_state(&self, window: &Window, resume: &Cell<Option<WindowState>>) {
         let (mode, bounds) = match window.window_bounds() {
             WindowBounds::Windowed(bounds) => (WindowMode::Windowed, bounds),
@@ -935,10 +950,18 @@ impl FloatingWindow {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MainVisibility {
+    Visible,
+    Prewarmed,
+    Hidden,
+}
+
 struct Desktop {
     backend: UiBackend,
     checks: Entity<updates::ReleaseChecks>,
     main: Option<WindowHandle<Root>>,
+    visibility: Rc<Cell<MainVisibility>>,
     floating: Rc<FloatingWindow>,
     resume: Rc<Cell<Option<WindowState>>>,
     floating_wallpaper: Option<WallpaperWatcher>,
@@ -946,6 +969,12 @@ struct Desktop {
 }
 
 impl Desktop {
+    fn idle(&self) -> bool {
+        self.main.is_some()
+            && self.visibility.get() != MainVisibility::Visible
+            && !self.backend.config.lock().unwrap().floating
+    }
+
     fn with_main(
         &mut self,
         cx: &mut App,
@@ -965,20 +994,35 @@ impl Desktop {
     }
 
     fn open_main(&mut self, overview: bool, cx: &mut App) {
+        let visibility = self.visibility.get();
         if self.with_main(cx, |app, window, cx| {
             app.deferred_close.set(false);
+            if visibility != MainVisibility::Visible {
+                app.sync_data();
+                cx.notify();
+            }
             if overview {
                 app.act(Action::Nav(Page::Overview), window, cx);
             }
             app.wallpaper.request(app.main_hwnd);
-            native::foreground(app.main_hwnd);
+            if visibility == MainVisibility::Prewarmed {
+                window.activate_window();
+            } else {
+                native::foreground(app.main_hwnd);
+            }
         }) {
+            self.visibility.set(MainVisibility::Visible);
             return;
         }
+        self.create_main(overview, true, cx);
+    }
+
+    fn create_main(&mut self, overview: bool, show: bool, cx: &mut App) {
         let floating = self.floating.clone();
         let backend = self.backend.clone();
         let checks = self.checks.clone();
         let resume = self.resume.clone();
+        let visibility = self.visibility.clone();
         let previous = resume.get();
         let handle = cx
             .open_window(
@@ -993,11 +1037,14 @@ impl Desktop {
                     }),
                     window_background: WindowBackgroundAppearance::Opaque,
                     window_min_size: Some(size(px(if cfg!(test) { 720. } else { 900. }), px(700.))),
+                    show,
+                    focus: show,
                     ..Default::default()
                 },
                 move |window, cx| {
-                    let view =
-                        cx.new(|cx| TrafficApp::new(backend, checks, floating, resume, window, cx));
+                    let view = cx.new(|cx| {
+                        TrafficApp::new(backend, checks, floating, resume, visibility, window, cx)
+                    });
                     if let Some(previous) = previous.filter(|_| !overview) {
                         view.update(cx, |app, cx| {
                             app.navigate(previous.page, window, cx);
@@ -1019,8 +1066,15 @@ impl Desktop {
             )
             .expect("无法创建主窗口");
         self.main = Some(handle);
-        cx.activate(true);
-        let _ = handle.update(cx, |_, window, _| native::foreground(native::hwnd(window)));
+        self.visibility.set(if show {
+            MainVisibility::Visible
+        } else {
+            MainVisibility::Prewarmed
+        });
+        if show {
+            cx.activate(true);
+            let _ = handle.update(cx, |_, window, _| native::foreground(native::hwnd(window)));
+        }
     }
 
     fn event(&mut self, event: UiEvent, cx: &mut App) -> bool {
@@ -1030,7 +1084,11 @@ impl Desktop {
             }
             UiEvent::ToggleFloat | UiEvent::ToggleTaskbar => {
                 let floating = matches!(event, UiEvent::ToggleFloat);
+                let hidden = self.visibility.get() != MainVisibility::Visible;
                 if self.with_main(cx, |app, _, cx| {
+                    if hidden {
+                        app.config = app.backend.config_snapshot();
+                    }
                     app.change_config(if floating { "floating" } else { "taskbar" });
                     if floating {
                         app.refresh_floating(cx);
@@ -1064,6 +1122,10 @@ impl Desktop {
                 self.with_main(cx, |app, _, _| migrating = app.migration_busy);
                 if !migrating {
                     self.backend.exit();
+                    // Let Windows destroy the hidden windows while GPUI still pumps messages.
+                    for handle in cx.windows() {
+                        let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+                    }
                     cx.quit();
                     return true;
                 }
@@ -1073,6 +1135,9 @@ impl Desktop {
     }
 
     fn tick(&mut self, cx: &mut App) {
+        if self.idle() {
+            return;
+        }
         let periodic = Instant::now() >= self.next_periodic;
         if periodic {
             self.next_periodic = Instant::now() + Duration::from_secs(5);
@@ -1088,12 +1153,11 @@ impl Desktop {
             });
         }
         let resume = self.resume.clone();
+        let visibility = self.visibility.clone();
         if self.with_main(cx, |app, window, cx| {
             app.tick(window, cx);
-            if app.deferred_close.get() && !app.window_work_pending() {
-                app.save_window_state(window, &resume);
-                app.backend.set_hotkey_recording(false);
-                window.remove_window();
+            if !app.window_work_pending() && app.deferred_close.replace(false) {
+                app.finish_close_to_tray(window, &resume, &visibility);
             }
         }) {
             self.floating_wallpaper = None;
@@ -1161,6 +1225,7 @@ pub(super) enum Launch {
     Main,
     Overview,
     Floating,
+    Prewarm,
 }
 
 #[cfg(test)]
@@ -1184,6 +1249,7 @@ pub(super) enum InterfaceEvents {
     Remote {
         wake: Arc<OwnedHandle>,
         first_poll: bool,
+        trimmed: bool,
     },
     #[cfg(test)]
     Local(tokio::sync::mpsc::UnboundedReceiver<UiEvent>),
@@ -1195,26 +1261,54 @@ impl InterfaceEvents {
         backend: &UiBackend,
         cx: &AsyncApp,
         revision: u64,
+        idle: bool,
     ) -> anyhow::Result<bridge::InterfaceUpdate> {
         match self {
-            Self::Remote { wake, first_poll } => {
+            Self::Remote {
+                wake,
+                first_poll,
+                trimmed,
+            } => {
                 use windows_sys::Win32::{
-                    Foundation::WAIT_FAILED, System::Threading::WaitForSingleObject,
+                    Foundation::{WAIT_FAILED, WAIT_TIMEOUT},
+                    System::Threading::WaitForSingleObject,
                 };
 
-                let timeout = if std::mem::take(first_poll) { 0 } else { 500 };
+                let first_poll = std::mem::take(first_poll);
+                if !idle {
+                    *trimmed = false;
+                }
+                // Give quick reopens a warm working set. Trim once per idle period.
+                let trim_on_timeout = idle && !*trimmed && !first_poll;
+                let timeout = if first_poll {
+                    0
+                } else if trim_on_timeout {
+                    5_000
+                } else if idle {
+                    30_000
+                } else {
+                    500
+                };
                 let backend = backend.clone();
                 let wake = wake.clone();
-                cx.background_executor()
+                let (update, did_trim) = cx
+                    .background_executor()
                     .spawn(async move {
-                        if unsafe { WaitForSingleObject(wake.as_raw_handle(), timeout) }
-                            == WAIT_FAILED
-                        {
-                            return Err(std::io::Error::last_os_error().into());
+                        match unsafe { WaitForSingleObject(wake.as_raw_handle(), timeout) } {
+                            WAIT_FAILED => Err(std::io::Error::last_os_error().into()),
+                            WAIT_TIMEOUT if idle && !first_poll => {
+                                backend.ping()?;
+                                if trim_on_timeout {
+                                    native::trim_working_set();
+                                }
+                                Ok((bridge::InterfaceUpdate::default(), trim_on_timeout))
+                            }
+                            _ => backend.poll(revision).map(|update| (update, false)),
                         }
-                        backend.poll(revision)
                     })
-                    .await
+                    .await?;
+                *trimmed |= did_trim;
+                Ok(update)
             }
             #[cfg(test)]
             Self::Local(shell) => {
@@ -1254,6 +1348,7 @@ pub(super) fn run_interface(
                 checks: cx.new(|_| checks),
                 backend,
                 main: None,
+                visibility: Rc::new(Cell::new(MainVisibility::Visible)),
                 floating,
                 resume: Rc::new(Cell::new(resume)),
                 floating_wallpaper: None,
@@ -1263,10 +1358,13 @@ pub(super) fn run_interface(
                 Launch::Main => desktop.open_main(false, cx),
                 Launch::Overview => desktop.open_main(true, cx),
                 Launch::Floating => desktop.tick(cx),
+                Launch::Prewarm => desktop.create_main(false, false, cx),
             }
             cx.spawn(async move |cx| {
-                while let Ok(revision) = cx.update(|cx| desktop.checks.read(cx).revision()) {
-                    let update = match events.receive(&desktop.backend, cx, revision).await {
+                while let Ok((revision, idle)) =
+                    cx.update(|cx| (desktop.checks.read(cx).revision(), desktop.idle()))
+                {
+                    let update = match events.receive(&desktop.backend, cx, revision, idle).await {
                         Ok(update) => update,
                         Err(reason) => {
                             *error.borrow_mut() = Some(reason);

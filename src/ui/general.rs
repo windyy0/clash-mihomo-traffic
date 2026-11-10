@@ -203,7 +203,7 @@ impl TrafficApp {
             .child(settings_separator(p))
             .child(settings_row(
                 "关闭窗口后继续统计",
-                "在后台继续采集；再次启动程序可打开主界面",
+                "隐藏主窗口并继续采集，点击托盘可快速恢复",
                 self.switch_control(
                     "settings-close-tray",
                     "关闭窗口后继续统计",

@@ -738,11 +738,7 @@ impl TrafficApp {
             }
             self.refresh();
         }
-        let next_data = self.backend.snapshot();
-        if self.data.storage_revision != next_data.storage_revision {
-            self.refresh();
-        }
-        self.data = next_data;
+        self.sync_data();
         if self.page == Page::Connections {
             self.sync_connections_view();
         }
@@ -787,6 +783,13 @@ impl TrafficApp {
         );
         self.app_icons.update_aliases(generation, keys);
         cx.notify();
+    }
+    fn sync_data(&mut self) {
+        let next_data = self.backend.snapshot();
+        if self.data.storage_revision != next_data.storage_revision {
+            self.refresh();
+        }
+        self.data = next_data;
     }
     fn save_config(&mut self) {
         if let Err(error) = self.backend.save_ui_config(self.config.clone()) {
@@ -1076,9 +1079,12 @@ impl TrafficApp {
         off_hover.a = if p.dark { 0.18 } else { 0.10 };
         let mut outline = rgb(p.text);
         outline.a = if p.dark { 0.40 } else { 0.32 };
-        let track = if on { rgb(p.accent) } else { off };
-        let hover = if on { rgb(p.accent_hover()) } else { off_hover };
-        let thumb = if on { p.switch_thumb() } else { p.muted };
+        let (track, hover, thumb) = if on {
+            let (track, hover, thumb) = p.switch_colors();
+            (rgb(track), rgb(hover), thumb)
+        } else {
+            (off, off_hover, p.muted)
+        };
         let tooltip = tooltip.to_owned();
         let key_action = action.clone();
         div()
@@ -1108,10 +1114,9 @@ impl TrafficApp {
                     .w(px(44.))
                     .h(px(24.))
                     .flex_none()
-                    .p(px(2.))
+                    .p(px(if on { 3. } else { 2. }))
                     .rounded_full()
-                    .border_1()
-                    .border_color(if on { rgb(p.accent) } else { outline })
+                    .when(!on, |d| d.border_1().border_color(outline))
                     .bg(track)
                     .group_hover(id, move |s| s.bg(hover))
                     .child(

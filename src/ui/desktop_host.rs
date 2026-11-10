@@ -70,6 +70,7 @@ impl Launch {
             Self::Main => "main",
             Self::Overview => "overview",
             Self::Floating => "floating",
+            Self::Prewarm => "prewarm",
         }
     }
 }
@@ -79,6 +80,7 @@ pub fn run_interface_process(mode: Option<&str>) -> Result<()> {
         Some("main") => Launch::Main,
         Some("overview") => Launch::Overview,
         Some("floating") => Launch::Floating,
+        Some("prewarm") => Launch::Prewarm,
         _ => anyhow::bail!("界面启动参数无效"),
     };
     let (backend, resume, initial_checks, wake) = UiBackend::connect()?;
@@ -94,6 +96,7 @@ pub fn run_interface_process(mode: Option<&str>) -> Result<()> {
         InterfaceEvents::Remote {
             wake: Arc::new(wake),
             first_poll: true,
+            trimmed: false,
         },
     )
 }
@@ -128,14 +131,20 @@ fn run_host(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()?;
+    let config = backend.config_snapshot();
+    if background
+        && !config.floating
+        && let Some(path) = migration_ready.take()
+    {
+        let _ = std::fs::write(path, b"ready");
+    }
     let mut launch = if !background {
         Some(Launch::Main)
-    } else if backend.config_snapshot().floating {
+    } else if config.close_to_tray {
+        Some(Launch::Prewarm)
+    } else if config.floating {
         Some(Launch::Floating)
     } else {
-        if let Some(path) = migration_ready.take() {
-            let _ = std::fs::write(path, b"ready");
-        }
         None
     };
     let mut interface: Option<Interface> = None;
@@ -271,14 +280,15 @@ mod tests {
         thread,
     };
     use windows_sys::Win32::{
-        Foundation::{HWND, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Foundation::{HWND, WAIT_OBJECT_0},
         System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
             WaitForSingleObject,
         },
         UI::WindowsAndMessaging::{
             FindWindowExW, GetWindowThreadProcessId, HWND_MESSAGE, IsIconic, IsWindow,
-            PostMessageW, SW_MINIMIZE, ShowWindowAsync, WM_CLOSE, WM_COMMAND, WM_LBUTTONUP,
+            IsWindowVisible, PostMessageW, SW_MINIMIZE, ShowWindowAsync, WM_CLOSE, WM_COMMAND,
+            WM_LBUTTONUP,
         },
     };
 
@@ -305,13 +315,13 @@ mod tests {
         }
     }
 
-    fn child_dashboard(parent_pid: u32) -> Option<(HWND, u32, OwnedHandle)> {
+    fn child_dashboard(parent_pid: u32, visible: bool) -> Option<(HWND, u32, OwnedHandle)> {
         use ntapi::ntpsapi::{
             NtQueryInformationProcess, PROCESS_BASIC_INFORMATION, ProcessBasicInformation,
         };
         windows(null_mut(), None, Some("Mihomo Traffic"))
             .into_iter()
-            .filter(|(hwnd, _)| native::visible(*hwnd as isize))
+            .filter(|(hwnd, _)| (unsafe { IsWindowVisible(*hwnd) } != 0) == visible)
             .find_map(|(hwnd, pid)| {
                 let process = unsafe {
                     OpenProcess(
@@ -352,7 +362,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     #[ignore = "requires an interactive Windows desktop and a built application"]
-    fn gpui_child_exits_and_reopens_while_collector_runs() -> Result<()> {
+    fn gpui_dashboard_closes_app_when_background_collection_is_disabled() -> Result<()> {
         let executable = std::env::var_os("MIHOMO_DESKTOP_TEST_EXE")
             .context("run scripts/check-desktop.ps1 to build the interface executable")?;
         let dir = tempfile::tempdir()?;
@@ -362,7 +372,7 @@ mod tests {
             taskbar: false,
             floating: false,
             open_hotkey: String::new(),
-            close_to_tray: true,
+            close_to_tray: false,
             update_check_frequency: CheckFrequency::Never,
             ..Config::default()
         }
@@ -386,79 +396,140 @@ mod tests {
                         .all(|(_, pid)| *pid != own_pid),
                     "the collector initialized GPUI"
                 );
-                let mut previous_pid = 0;
-                let mut previous_query = 0;
-                for cycle in 0..3 {
-                    let floating = cycle == 2;
-                    if floating {
-                        anyhow::ensure!(unsafe { PostMessageW(shell, WM_COMMAND, 2, 0) } != 0);
-                        wait_for(
-                            || collector.config_snapshot().floating.then_some(()),
-                            "the shell did not enable the floating window",
-                        )?;
-                    }
-                    let opened = Instant::now();
-                    anyhow::ensure!(unsafe { PostMessageW(shell, WM_COMMAND, 1, 0) } != 0);
-                    let (main, pid, process) = wait_for(
-                        || child_dashboard(own_pid),
-                        "the shell did not open the dashboard",
-                    )?;
-                    anyhow::ensure!(pid != previous_pid);
-                    println!("open cycle {cycle}: visible in {:?}", opened.elapsed());
-                    previous_pid = pid;
-                    previous_query = wait_for(
-                        || {
-                            let state = collector.shared.lock().unwrap();
-                            (state.report_id > previous_query && state.report.error.is_empty())
-                                .then_some(state.report_id)
-                        },
-                        "the interface did not complete its query in the collector",
-                    )?;
-                    if cycle == 0 {
-                        unsafe { ShowWindowAsync(main, SW_MINIMIZE) };
-                        wait_for(
-                            || (unsafe { IsIconic(main) } != 0).then_some(()),
-                            "the dashboard did not minimize",
-                        )?;
-                        let restored = Instant::now();
-                        anyhow::ensure!(
-                            unsafe {
-                                PostMessageW(shell, crate::tray::CALLBACK, 0, WM_LBUTTONUP as isize)
-                            } != 0
-                        );
-                        wait_for(
-                            || (unsafe { IsIconic(main) } == 0).then_some(()),
-                            "the open event did not restore the dashboard",
-                        )?;
-                        println!("open minimized dashboard: {:?}", restored.elapsed());
-                    }
-                    anyhow::ensure!(unsafe { PostMessageW(main, WM_CLOSE, 0, 0) } != 0);
-                    if floating {
-                        wait_for(
-                            || (unsafe { IsWindow(main) } == 0).then_some(()),
-                            "the dashboard did not close",
-                        )?;
-                        anyhow::ensure!(
-                            unsafe { WaitForSingleObject(process.as_raw_handle(), 700) }
-                                == WAIT_TIMEOUT,
-                            "the interface exited with the floating window enabled"
-                        );
-                        anyhow::ensure!(unsafe { PostMessageW(shell, WM_COMMAND, 2, 0) } != 0);
-                    }
-                    anyhow::ensure!(
-                        unsafe { WaitForSingleObject(process.as_raw_handle(), 8_000) }
-                            == WAIT_OBJECT_0,
-                        "closing to tray left the GPUI process resident"
-                    );
-                    anyhow::ensure!(
-                        unsafe { IsWindow(shell) } != 0 && !collector.done.load(Ordering::Acquire),
-                        "closing the GPUI process stopped the collector"
-                    );
-                }
+                anyhow::ensure!(unsafe { PostMessageW(shell, WM_COMMAND, 1, 0) } != 0);
+                let (main, _, process) = wait_for(
+                    || child_dashboard(own_pid, true),
+                    "the shell did not open the dashboard",
+                )?;
+                wait_for(
+                    || {
+                        let state = collector.shared.lock().unwrap();
+                        (state.report_id > 0 && state.report.error.is_empty()).then_some(())
+                    },
+                    "the interface did not complete its query in the collector",
+                )?;
+                anyhow::ensure!(unsafe { ShowWindowAsync(main, SW_MINIMIZE) } != 0);
+                wait_for(
+                    || (unsafe { IsIconic(main) } != 0).then_some(()),
+                    "the dashboard did not minimize",
+                )?;
+                anyhow::ensure!(
+                    unsafe { PostMessageW(shell, crate::tray::CALLBACK, 0, WM_LBUTTONUP as isize) }
+                        != 0
+                );
+                wait_for(
+                    || native::visible(main as isize).then_some(()),
+                    "the tray did not restore the minimized dashboard",
+                )?;
+                anyhow::ensure!(unsafe { PostMessageW(main, WM_CLOSE, 0, 0) } != 0);
+                anyhow::ensure!(
+                    unsafe { WaitForSingleObject(process.as_raw_handle(), 8_000) } == WAIT_OBJECT_0,
+                    "closing the dashboard did not exit the interface"
+                );
                 Ok(())
             })();
-            unsafe { PostMessageW(shell, WM_COMMAND, 4, 0) };
+            if result.is_err() {
+                unsafe { PostMessageW(shell, WM_COMMAND, 4, 0) };
+            }
             result
+        });
+        let host_result = run_host(backend.clone(), Path::new(&executable), true, None);
+        let shutdown = backend.shutdown();
+        host_result?;
+        shutdown?;
+        exercise.join().expect("desktop exercise panicked")
+    }
+
+    #[::core::prelude::v1::test]
+    #[ignore = "requires an interactive Windows desktop and a built application"]
+    fn gpui_tray_prewarms_and_reuses_hidden_dashboard_by_default() -> Result<()> {
+        let executable = std::env::var_os("MIHOMO_DESKTOP_TEST_EXE")
+            .context("run scripts/check-desktop.ps1 to build the interface executable")?;
+        let dir = tempfile::tempdir()?;
+        Config {
+            endpoint: "http://127.0.0.1:1".into(),
+            tray_visible: false,
+            taskbar: false,
+            floating: false,
+            open_hotkey: String::new(),
+            update_check_frequency: CheckFrequency::Never,
+            ..Config::default()
+        }
+        .save(dir.path())?;
+        let path = dir.path().join("config.toml");
+        let config = std::fs::read_to_string(&path)?;
+        std::fs::write(path, format!("fast_tray_open = false\n{config}"))?;
+        let backend = Backend::start(dir.path().into())?;
+        let collector = backend.clone();
+        let exercise = thread::spawn(move || -> Result<()> {
+            let own_pid = std::process::id();
+            let (shell, _) = wait_for(
+                || {
+                    windows(null_mut(), Some("MihomoTrafficShell"), None)
+                        .into_iter()
+                        .find(|(_, pid)| *pid == own_pid)
+                },
+                "the collector did not start its native shell",
+            )?;
+            let result = (|| {
+                let (main, pid, process) = wait_for(
+                    || child_dashboard(own_pid, false),
+                    "the dashboard was not prewarmed in the background",
+                )?;
+                for cycle in 0..3 {
+                    thread::sleep(if cycle == 2 {
+                        Duration::from_secs(6)
+                    } else {
+                        Duration::from_millis(750)
+                    });
+                    let opened = Instant::now();
+                    anyhow::ensure!(
+                        unsafe {
+                            PostMessageW(shell, crate::tray::CALLBACK, 0, WM_LBUTTONUP as isize)
+                        } != 0
+                    );
+                    let (reopened, reopened_pid, _) = wait_for(
+                        || child_dashboard(own_pid, true),
+                        "the tray did not show the prewarmed dashboard",
+                    )?;
+                    anyhow::ensure!(reopened == main && reopened_pid == pid);
+                    println!("fast tray open {cycle}: visible in {:?}", opened.elapsed());
+                    anyhow::ensure!(unsafe { PostMessageW(main, WM_CLOSE, 0, 0) } != 0);
+                    wait_for(
+                        || (unsafe { IsWindowVisible(main) } == 0).then_some(()),
+                        "closing did not hide the dashboard",
+                    )?;
+                    anyhow::ensure!(unsafe { IsWindow(main) } != 0);
+                }
+                for enabled in [true, false, true, false] {
+                    anyhow::ensure!(unsafe { PostMessageW(shell, WM_COMMAND, 2, 0) } != 0);
+                    wait_for(
+                        || (collector.config_snapshot().floating == enabled).then_some(()),
+                        "the hidden interface did not process the floating window toggle",
+                    )?;
+                    wait_for(
+                        || {
+                            let visible = windows(null_mut(), Some("Zed::Window"), None)
+                                .into_iter()
+                                .any(|(hwnd, owner)| {
+                                    owner == pid && hwnd != main && native::visible(hwnd as isize)
+                                });
+                            (visible == enabled).then_some(())
+                        },
+                        "the floating window did not follow the toggle",
+                    )?;
+                    anyhow::ensure!(unsafe { IsWindowVisible(main) } == 0);
+                }
+                thread::sleep(Duration::from_millis(750));
+                Ok(process)
+            })();
+            unsafe { PostMessageW(shell, WM_COMMAND, 4, 0) };
+            let process = result?;
+            anyhow::ensure!(
+                unsafe { WaitForSingleObject(process.as_raw_handle(), 8_000) } == WAIT_OBJECT_0,
+                "quitting did not stop the idle interface process"
+            );
+            Ok(())
         });
         let host_result = run_host(backend.clone(), Path::new(&executable), true, None);
         let shutdown = backend.shutdown();

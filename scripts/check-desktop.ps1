@@ -41,7 +41,7 @@ try {
     if ($testNames.Count -eq 0) { throw "No ignored tests matched suite '$Suite' and filter '$Filter'" }
     if ($List) { $testNames; return }
 
-    if ($testNames -contains 'ui::desktop_host::tests::gpui_child_exits_and_reopens_while_collector_runs') {
+    if ($testNames -match '^ui::desktop_host::tests::gpui_') {
         $interfaceArguments = @('build', '--locked', '--message-format=json-render-diagnostics')
         if ($Release) { $interfaceArguments += '--release' }
         $interfaceMessages = @(cargo @interfaceArguments)
