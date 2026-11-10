@@ -5,7 +5,7 @@ use std::{io::Read, path::Path, sync::OnceLock, time::Duration};
 
 mod installer;
 pub(crate) mod portable;
-pub(crate) use installer::download_and_install;
+pub(crate) use installer::{INSTALL_INCOMPLETE, INSTALL_RESULT_FILE, download_and_install};
 
 pub const RELEASES_PAGE: &str = "https://github.com/windyy0/clash-mihomo-traffic/releases";
 pub const CACHE_FILE: &str = "update-cache.json";
@@ -19,7 +19,8 @@ const MAX_NOTES: usize = 32 * 1024;
 pub(crate) enum UpdateProgress {
     Connecting,
     Downloading { received: u64, total: Option<u64> },
-    Applying,
+    Preparing,
+    Installing,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]

@@ -79,8 +79,7 @@ pub fn installed_app_dir() -> Option<std::path::PathBuf> {
         if registered.is_absolute() {
             let registered_exe =
                 std::fs::canonicalize(registered.join("mihomo-traffic.exe")).ok()?;
-            return (std::fs::canonicalize(&exe).ok()? == registered_exe)
-                .then(|| directory.to_path_buf());
+            return (std::fs::canonicalize(&exe).ok()? == registered_exe).then_some(registered);
         }
     }
 

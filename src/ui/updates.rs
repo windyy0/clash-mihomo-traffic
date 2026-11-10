@@ -70,13 +70,19 @@ pub(super) struct State {
     portable: bool,
     install_dir: Option<std::path::PathBuf>,
     install_progress: Option<UpdateProgress>,
-    install_error: Option<String>,
+    install_error: Option<(String, String)>,
     #[cfg(test)]
     check_button_bounds: Rc<Cell<Bounds<Pixels>>>,
+    #[cfg(test)]
+    download_button_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl State {
-    pub(super) fn new(checks: Entity<ReleaseChecks>, cx: &mut App) -> Self {
+    pub(super) fn new(
+        checks: Entity<ReleaseChecks>,
+        data_dir: &std::path::Path,
+        cx: &mut App,
+    ) -> Self {
         let portable = crate::config::portable_data_dir().is_some();
         Self {
             checks,
@@ -92,9 +98,17 @@ impl State {
                 crate::native::installed_app_dir()
             },
             install_progress: None,
-            install_error: None,
+            install_error: if portable {
+                None
+            } else {
+                std::fs::read_to_string(data_dir.join(release_update::INSTALL_RESULT_FILE))
+                    .ok()
+                    .map(|tag| (tag, release_update::INSTALL_INCOMPLETE.into()))
+            },
             #[cfg(test)]
             check_button_bounds: Rc::new(Cell::new(Bounds::default())),
+            #[cfg(test)]
+            download_button_bounds: Rc::new(Cell::new(Bounds::default())),
         }
     }
 
@@ -113,6 +127,10 @@ impl State {
         self.install_progress.is_some()
     }
 
+    fn show_download(&self, cx: &App) -> bool {
+        self.installing() || self.download_url(cx).is_some()
+    }
+
     fn download_label(&self) -> &'static str {
         if self.portable {
             "下载并更新"
@@ -120,6 +138,20 @@ impl State {
             "下载并安装"
         } else {
             "下载更新"
+        }
+    }
+
+    fn action_status(&self, progress_id: &'static str, p: Palette, cx: &App) -> Option<Div> {
+        if let Some(progress) = self.install_progress {
+            Some(update_progress_bar(progress, progress_id, p))
+        } else {
+            let (tag, error) = self.install_error.as_ref()?;
+            (self.checks.read(cx).newer_release()?.tag() == tag).then(|| {
+                label(error.clone(), p.amber)
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .truncate()
+            })
         }
     }
 }
@@ -143,7 +175,8 @@ fn update_progress_bar(progress: UpdateProgress, id: &'static str, p: Palette) -
             received,
             total: None,
         } => (None, format!("已下载 {}", human_bytes(received))),
-        UpdateProgress::Applying => (Some(1.), "下载完成，正在准备更新…".into()),
+        UpdateProgress::Preparing => (None, "正在准备更新…".into()),
+        UpdateProgress::Installing => (None, "正在安装…".into()),
     };
     let fill = div().absolute().h_full().rounded_full().bg(rgb(p.accent));
     let track = div()
@@ -170,13 +203,11 @@ fn update_progress_bar(progress: UpdateProgress, id: &'static str, p: Palette) -
     };
     column()
         .flex_1()
-        .flex_basis(px(140.))
         .min_w_0()
         .max_w(px(260.))
-        .mr_auto()
         .gap(px(5.))
         .child(track)
-        .child(label(text, p.muted).text_size(px(12.)).whitespace_normal())
+        .child(label(text, p.muted).text_size(px(12.)).truncate())
 }
 
 impl ReleaseChecks {
@@ -555,6 +586,7 @@ impl TrafficApp {
             return;
         }
         let release = release.clone();
+        let tag = release.tag().to_string();
         let data_dir = self.backend.dir.clone();
         self.updates.install_error = None;
         let (send, mut receive) = tokio::sync::oneshot::channel();
@@ -567,7 +599,9 @@ impl TrafficApp {
                     progress_tx.send_replace(value);
                 };
                 let result = match install_dir {
-                    Some(dir) => release_update::download_and_install(&release, &dir, progress),
+                    Some(dir) => {
+                        release_update::download_and_install(&release, &dir, &data_dir, progress)
+                    }
                     None => {
                         release_update::portable::download_and_update(&release, &data_dir, progress)
                     }
@@ -576,7 +610,7 @@ impl TrafficApp {
             })
         {
             tracing::warn!(%error, "Unable to start the installer download");
-            self.updates.install_error = Some("无法启动下载，请重试。".into());
+            self.updates.install_error = Some((tag, "无法启动下载，请重试。".into()));
             return;
         }
         self.updates.install_progress = Some(UpdateProgress::Connecting);
@@ -600,7 +634,7 @@ impl TrafficApp {
                 app.updates.install_progress = None;
                 if let Err(error) = result {
                     tracing::warn!(%error, "Unable to complete the update installation");
-                    app.updates.install_error = Some(error.to_string());
+                    app.updates.install_error = Some((tag, error.to_string()));
                 }
                 cx.notify();
             });
@@ -684,11 +718,10 @@ impl TrafficApp {
             }))
     }
 
-    pub(super) fn update_header_actions(&self, cx: &Context<Self>) -> Div {
+    pub(super) fn check_update_button(&self, cx: &Context<Self>) -> Div {
         let p = self.p;
         let checks = self.updates.checks.read(cx);
         let checking = matches!(checks.latest, Fetch::Pending);
-        let installing = self.updates.installing();
         let check = Button::new("about-check-update")
             .label(if checking {
                 "正在检查…"
@@ -696,7 +729,7 @@ impl TrafficApp {
                 "检查更新"
             })
             .custom(self.update_button_style(p.text, cx))
-            .disabled(checking)
+            .disabled(checking || self.updates.installing())
             .on_click(cx.listener(|app, _, window, cx| {
                 app.act(Action::Update(UpdateAction::Check), window, cx)
             }));
@@ -711,23 +744,41 @@ impl TrafficApp {
                     .size_full(),
             )
         };
-        let notice = checks.notice().map(|notice| {
+        div().flex_none().child(check)
+    }
+
+    pub(super) fn update_actions(&self, cx: &Context<Self>) -> Option<Div> {
+        let p = self.p;
+        let show_download = self.updates.show_download(cx);
+        let download = Button::new("about-download-update")
+            .label(self.updates.download_label())
+            .custom(self.update_button_style(p.accent_text, cx))
+            .disabled(self.updates.installing())
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.act(Action::Update(UpdateAction::Download), window, cx);
+            }));
+        #[cfg(test)]
+        let download = {
+            let bounds = self.updates.download_button_bounds.clone();
+            div().relative().flex_none().child(download).child(
+                canvas(move |rect, _, _| bounds.set(rect), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+        };
+        let notice = self.updates.checks.read(cx).notice().map(|notice| {
             let (text, color) = match notice {
-                Notice::Update(release) if installing => (release.tag().to_string(), p.accent_text),
                 Notice::Update(release) => (format!("发现新版本 {}", release.tag()), p.accent_text),
                 Notice::Result(text) => (text.to_string(), p.muted),
                 Notice::Failed(error) => (error.message().to_string(), p.amber),
             };
             row()
                 .gap(px(4.))
+                .flex_1()
                 .min_w_0()
-                .when(installing, |d| d.max_w(px(144.)))
-                .child(
-                    label(text, color)
-                        .min_w_0()
-                        .text_size(px(12.))
-                        .whitespace_normal(),
-                )
+                .child(label(text, color).min_w_0().text_size(px(12.)).truncate())
                 .child(
                     Button::new("dismiss-update-notice")
                         .label("×")
@@ -738,43 +789,18 @@ impl TrafficApp {
                         })),
                 )
         });
-        column()
-            .flex_1()
-            .min_w_0()
-            .gap(px(4.))
-            .items_end()
-            .child(
-                row()
-                    .w_full()
-                    .when(!installing, |d| d.flex_wrap())
-                    .justify_end()
-                    .gap(px(8.))
-                    .when_some(self.updates.install_progress, |d, progress| {
-                        d.child(update_progress_bar(progress, "about-download-progress", p))
-                    })
-                    .when(
-                        !installing && self.updates.download_url(cx).is_some(),
-                        |d| {
-                            d.child(
-                                Button::new("about-download-update")
-                                    .label(self.updates.download_label())
-                                    .custom(self.update_button_style(p.accent_text, cx))
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        app.act(Action::Update(UpdateAction::Download), window, cx);
-                                    })),
-                            )
-                        },
-                    )
-                    .children(notice)
-                    .child(check),
-            )
-            .when_some(self.updates.install_error.as_ref(), |d, error| {
-                d.child(
-                    label(error.clone(), p.amber)
-                        .text_size(px(12.))
-                        .whitespace_normal(),
-                )
-            })
+        (notice.is_some() || show_download).then(|| {
+            row()
+                .w_full()
+                .h(px(32.))
+                .justify_end()
+                .gap(px(12.))
+                .children(notice)
+                .when(show_download, |d| {
+                    d.children(self.updates.action_status("about-download-progress", p, cx))
+                        .child(download)
+                })
+        })
     }
 
     pub(super) fn update_frequency_row(&self, cx: &Context<Self>) -> Div {
@@ -945,39 +971,53 @@ impl TrafficApp {
                                 }),
                         )
                         .child(settings_separator(p))
-                        .when_some(state.install_error.as_ref(), |d, error| {
-                            d.child(
-                                label(error.clone(), p.amber)
-                                    .text_size(px(12.))
-                                    .whitespace_normal(),
-                            )
-                        })
                         .child(
                             row()
                                 .justify_end()
-                                .when(!state.installing(), |d| d.flex_wrap())
-                                .when_some(state.install_progress, |d, progress| {
-                                    d.child(update_progress_bar(
-                                        progress,
-                                        "notes-download-progress",
-                                        p,
-                                    ))
-                                })
-                                .children(button(1, "about-refresh-notes", "刷新", false, cx))
-                                .children(button(
-                                    2,
-                                    "about-release-page",
-                                    "在 GitHub 查看",
-                                    false,
-                                    cx,
-                                ))
-                                .children(button(
-                                    3,
-                                    "about-notes-download",
-                                    state.download_label(),
-                                    true,
-                                    cx,
-                                )),
+                                .child(
+                                    row()
+                                        .flex_none()
+                                        .children(button(
+                                            1,
+                                            "about-refresh-notes",
+                                            "刷新",
+                                            false,
+                                            cx,
+                                        ))
+                                        .children(button(
+                                            2,
+                                            "about-release-page",
+                                            "在 GitHub 查看",
+                                            false,
+                                            cx,
+                                        )),
+                                )
+                                .when(state.show_download(cx), |d| {
+                                    d.child(div().flex_1().min_w_0())
+                                        .children(state.action_status(
+                                            "notes-download-progress",
+                                            p,
+                                            cx,
+                                        ))
+                                        .child(
+                                            self.button(
+                                                "about-notes-download",
+                                                state.download_label(),
+                                                true,
+                                                Action::Update(UpdateAction::Download),
+                                                cx,
+                                            )
+                                            .flex_none()
+                                            .when_else(
+                                                state.installing(),
+                                                |d| d.opacity(0.5).cursor_default(),
+                                                |d| {
+                                                    d.track_focus(&state.notes_controls[3])
+                                                        .focus(move |d| d.bg(state_surface(p)))
+                                                },
+                                            ),
+                                        )
+                                }),
                         ),
                 ),
         )
@@ -1098,6 +1138,14 @@ impl TrafficApp {
     #[cfg(test)]
     pub(super) fn set_fixture_update_progress(&mut self, progress: Option<UpdateProgress>) {
         self.updates.install_progress = progress;
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_update_button_bounds(&self) -> [Bounds<Pixels>; 2] {
+        [
+            self.updates.check_button_bounds.get(),
+            self.updates.download_button_bounds.get(),
+        ]
     }
 
     #[cfg(test)]

@@ -95,7 +95,7 @@ impl TrafficApp {
         let request_sequence = resume
             .get()
             .map_or(sequence, |state| state.request_sequence.max(sequence));
-        let updates = updates::State::new(checks.clone(), cx);
+        let updates = updates::State::new(checks.clone(), &backend.dir, cx);
         let update_subscription = cx.observe(&checks, |_, _, cx| cx.notify());
         let dark = config.theme == "dark" || (config.theme == "system" && native::dark_system());
         let mut wallpaper = WallpaperWatcher::new();

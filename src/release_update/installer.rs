@@ -11,24 +11,40 @@ use std::{
 
 pub(super) const MAX_PACKAGE: usize = 256 * 1024 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const INSTALL_RESULT_FILE: &str = "update-install-failed";
+pub(crate) const INSTALL_INCOMPLETE: &str = "安装未完成，可以重试。";
 
 pub(crate) fn download_and_install(
     release: &Release,
     install_dir: &Path,
-    progress: impl FnMut(UpdateProgress),
+    data_dir: &Path,
+    mut progress: impl FnMut(UpdateProgress),
 ) -> Result<()> {
     let downloads = dirs::download_dir().context("无法找到系统下载目录。")?;
     let dir = tempfile::Builder::new()
         .prefix("MihomoTraffic-")
         .tempdir_in(downloads)
         .context("无法在系统下载目录中保存安装包。")?;
-    let setup = download_package(release, false, dir.path(), progress)?;
-    // Inno Setup stops the running app after the user confirms the installation.
+    let setup = download_package(release, false, dir.path(), &mut progress)?;
     let mut target = std::ffi::OsString::from("/DIR=");
     target.push(install_dir);
+    let mut update = std::ffi::OsString::from("/MIHOMOUPDATEDATADIR=");
+    update.push(data_dir);
+    // Setup shows its own progress after the application exits to release its files.
+    progress(UpdateProgress::Installing);
     let mut installer = Command::new(setup)
         .current_dir(dir.path())
+        .args([
+            "/SILENT",
+            "/SP-",
+            "/SUPPRESSMSGBOXES",
+            "/NOCANCEL",
+            "/NORESTART",
+            "/NOCLOSEAPPLICATIONS",
+            "/NORESTARTAPPLICATIONS",
+        ])
         .arg(target)
+        .arg(update)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -36,7 +52,7 @@ pub(crate) fn download_and_install(
         .context("无法打开安装程序。")?;
     let _ = dir.keep();
     let status = installer.wait().context("无法读取安装结果。")?;
-    ensure!(status.success(), "安装未完成，可以重试。");
+    ensure!(status.success(), INSTALL_INCOMPLETE);
     Ok(())
 }
 
@@ -107,7 +123,7 @@ pub(super) fn download_package(
 
     let package = dir.join(asset.name);
     std::fs::rename(partial, &package).context("无法保存校验后的更新包。")?;
-    progress(UpdateProgress::Applying);
+    progress(UpdateProgress::Preparing);
     Ok(package)
 }
 

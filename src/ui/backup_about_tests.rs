@@ -193,6 +193,25 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
                 app.set_fixture_update_progress(None);
                 cx.notify();
             })?;
+            Timer::after(Duration::from_millis(80)).await;
+            let idle = this.update_in(cx, |app, _, _| app.fixture_update_button_bounds())?;
+            anyhow::ensure!(idle.iter().all(|bounds| bounds.size.width > px(0.)), "update buttons were not laid out");
+            for progress in [crate::release_update::UpdateProgress::Preparing, crate::release_update::UpdateProgress::Installing] {
+                this.update_in(cx, |app, _, cx| {
+                    app.set_fixture_update_progress(Some(progress));
+                    cx.notify();
+                })?;
+                Timer::after(Duration::from_millis(80)).await;
+                this.update_in(cx, |app, _, _| {
+                    let current = app.fixture_update_button_bounds();
+                    anyhow::ensure!(current == idle, "update controls moved during {progress:?}: {idle:?} -> {current:?}");
+                    Ok(())
+                })??;
+            }
+            this.update_in(cx, |app, _, cx| {
+                app.set_fixture_update_progress(None);
+                cx.notify();
+            })?;
             println!("backup/about checks passed: confirmation reset, update notes scroll and keyboard, 32 layouts");
             let hold = std::env::var("MIHOMO_BACKUP_ABOUT_QA_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
             if hold > 0 {
@@ -233,6 +252,11 @@ fn gpui_backup_about_layout_and_restore_confirmation() {
     std::fs::write(
         dir.path().join(crate::release_update::CACHE_FILE),
         cached.to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(crate::release_update::INSTALL_RESULT_FILE),
+        format!("v{newer}"),
     )
     .unwrap();
     Config {

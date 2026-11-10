@@ -33,6 +33,9 @@ zhtw.ConfirmMove=要更換安裝資料夾嗎？%n%n原資料夾：%1%n新資料�
 en.SilentMoveNeedsConsent=Changing the installation folder in silent mode requires /MOVEINSTALL=1.
 zhcn.SilentMoveNeedsConsent=静默安装时更换目录需要指定 /MOVEINSTALL=1。
 zhtw.SilentMoveNeedsConsent=靜默安裝時更換資料夾需要指定 /MOVEINSTALL=1。
+en.UpdateTargetInvalid=The in-app update requires the existing installation folder and data folder.
+zhcn.UpdateTargetInvalid=应用内更新需要使用现有的安装目录和数据目录。
+zhtw.UpdateTargetInvalid=應用程式內更新需要使用現有的安裝資料夾和資料資料夾。
 en.StopFailed=Mihomo Traffic did not exit in time. Close it from the system tray and try again.
 zhcn.StopFailed=Mihomo Traffic 未能及时退出。请从系统托盘退出后重试。
 zhtw.StopFailed=Mihomo Traffic 未能及時結束。請從系統匣結束後再試。
@@ -80,8 +83,8 @@ const
   RunValue = 'MihomoTraffic';
 
 var
-  PreviousAppDir, AutorunAfterInstall: String;
-  RemovePersonalData: Boolean;
+  PreviousAppDir, AutorunAfterInstall, UpdateDataDir: String;
+  RemovePersonalData, RestartAfterUpdate, UpdateInstalled: Boolean;
 
 function FindAppWindow(const ClassName, WindowName: String): HWND;
   external 'FindWindowW@user32.dll stdcall';
@@ -140,6 +143,8 @@ end;
 
 procedure InitializeWizard;
 begin
+  if WizardSilent then
+    UpdateDataDir := ExpandConstant('{param:MIHOMOUPDATEDATADIR|}');
   if not RegQueryStringValue(HKCU, UninstallKey, 'Inno Setup: App Path', PreviousAppDir) then
     RegQueryStringValue(HKCU, UninstallKey, 'InstallLocation', PreviousAppDir);
 end;
@@ -196,6 +201,13 @@ var
   ExitCode, Attempt: Integer;
 begin
   Result := '';
+  if (UpdateDataDir <> '') and (ChangingDirectory or not DirExists(UpdateDataDir) or
+    not FileExists(AddBackslash(WizardDirValue) + 'mihomo-traffic.exe') or
+    FileExists(AddBackslash(WizardDirValue) + 'portable.flag')) then
+  begin
+    Result := CustomMessage('UpdateTargetInvalid');
+    Exit;
+  end;
   if WizardSilent and ChangingDirectory and (ExpandConstant('{param:MOVEINSTALL|0}') <> '1') then
   begin
     Result := CustomMessage('SilentMoveNeedsConsent');
@@ -206,6 +218,7 @@ begin
     Result := CustomMessage('StopFailed');
     Exit;
   end;
+  RestartAfterUpdate := UpdateDataDir <> '';
   if not ChangingDirectory then
     Exit;
 
@@ -246,6 +259,8 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   CurrentCommand, Arguments, Uninstaller: String;
 begin
+  if CurStep = ssDone then
+    UpdateInstalled := True;
   if CurStep <> ssPostInstall then
     Exit;
 
@@ -265,6 +280,28 @@ begin
     if not RegWriteStringValue(HKCU, RunKey, RunValue, AutorunAfterInstall) then
       Log('Could not restore the Mihomo Traffic startup entry.');
   end;
+end;
+
+procedure DeinitializeSetup;
+var
+  Marker: String;
+  ExitCode: Integer;
+begin
+  if not RestartAfterUpdate then
+    Exit;
+
+  { After setup has stopped the running process, hand a failure back to the
+    relaunched app so it can show the retry hint beside the update button. }
+  Marker := AddBackslash(UpdateDataDir) + 'update-install-failed';
+  if UpdateInstalled then
+    DeleteFile(Marker)
+  else if not SaveStringToFile(Marker, 'v{#AppVersion}', False) then
+    Log('Could not record the in-app update failure.');
+
+  if not Exec(ExpandConstant('{app}\mihomo-traffic.exe'),
+    '--data-dir "' + AddBackslash(UpdateDataDir) + '."',
+    ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ExitCode) then
+    Log('Could not reopen Mihomo Traffic after the in-app update.');
 end;
 
 function ConfirmUninstallOptions: Boolean;

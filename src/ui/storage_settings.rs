@@ -345,6 +345,10 @@ impl TrafficApp {
     }
 
     pub(super) fn migrate_data_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.updates.installing() {
+            self.data_directory_error = "应用正在更新，请完成后再迁移".into();
+            return;
+        }
         if self.backend.shared.lock().unwrap().storage_management.busy {
             self.data_directory_error = "存储任务正在执行，请完成后再迁移".into();
             return;

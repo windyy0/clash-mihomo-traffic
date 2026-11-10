@@ -299,7 +299,7 @@ impl TrafficApp {
         let p = self.p;
         column().gap(px(16.))
             .child(self.card().group(ABOUT_APP_CARD_GROUP).gap(px(12.))
-                .child(row().gap(px(10.))
+                .child(row().gap(px(10.)).justify_between()
                     .child(row().gap(px(14.)).flex_none()
                         .child(img("images/traffic.png").size(px(44.)).flex_none())
                         .child(column().gap(px(1.)).items_start().whitespace_nowrap()
@@ -309,7 +309,8 @@ impl TrafficApp {
                                     .text_size(px(12.))
                                     .line_height(px(16.)))
                                 .child(self.update_notes_link(cx)))))
-                    .child(self.update_header_actions(cx)))
+                    .child(self.check_update_button(cx)))
+                .children(self.update_actions(cx))
                 .child(settings_separator(p))
                 .child(self.update_frequency_row(cx)))
             .child(self.card().gap(px(0.))

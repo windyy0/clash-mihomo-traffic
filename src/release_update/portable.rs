@@ -27,7 +27,7 @@ const FILES: [&str; 3] = ["LICENSE", "THIRD-PARTY-NOTICES.txt", PROGRAM];
 pub(crate) fn download_and_update(
     release: &Release,
     data_dir: &Path,
-    progress: impl FnMut(UpdateProgress),
+    mut progress: impl FnMut(UpdateProgress),
 ) -> Result<()> {
     let executable = std::env::current_exe()?;
     let directory = executable.parent().context("无法找到便携版目录。")?;
@@ -36,11 +36,12 @@ pub(crate) fn download_and_update(
         .prefix(STAGE_PREFIX)
         .tempdir_in(directory)
         .context("便携版目录不可写，无法暂存更新。")?;
-    let archive = installer::download_package(release, true, stage.path(), progress)?;
+    let archive = installer::download_package(release, true, stage.path(), &mut progress)?;
     unpack(&archive, stage.path()).context("无法解压便携版更新包。")?;
     fs::remove_file(archive)?;
     let helper = stage.path().join(HELPER);
     fs::copy(&executable, &helper).context("无法准备便携版更新程序。")?;
+    progress(UpdateProgress::Installing);
     let mut child = command(&helper)
         .arg("--apply-portable-update")
         .arg(
