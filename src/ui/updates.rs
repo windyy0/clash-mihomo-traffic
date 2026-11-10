@@ -718,7 +718,7 @@ impl TrafficApp {
             }))
     }
 
-    pub(super) fn check_update_button(&self, cx: &Context<Self>) -> Div {
+    pub(super) fn update_check_controls(&self, cx: &Context<Self>) -> Div {
         let p = self.p;
         let checks = self.updates.checks.read(cx);
         let checking = matches!(checks.latest, Fetch::Pending);
@@ -744,12 +744,44 @@ impl TrafficApp {
                     .size_full(),
             )
         };
-        div().flex_none().child(check)
+        let notice = checks.notice().filter(|notice| {
+            !matches!(notice, Notice::Update(_)) || !self.updates.show_download(cx)
+        });
+        row()
+            .min_w_0()
+            .justify_end()
+            .gap(px(8.))
+            .children(notice.map(|notice| self.update_notice(notice, cx)))
+            .child(check)
+    }
+
+    fn update_notice(&self, notice: Notice<'_>, cx: &Context<Self>) -> Div {
+        let p = self.p;
+        let (text, color) = match notice {
+            Notice::Update(release) => (format!("发现新版本 {}", release.tag()), p.accent_text),
+            Notice::Result(text) => (text.to_string(), p.muted),
+            Notice::Failed(error) => (error.message().to_string(), p.amber),
+        };
+        row()
+            .gap(px(4.))
+            .min_w_0()
+            .child(label(text, color).min_w_0().text_size(px(12.)).truncate())
+            .child(
+                Button::new("dismiss-update-notice")
+                    .label("×")
+                    .ghost()
+                    .tooltip("关闭更新提示")
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.act(Action::Update(UpdateAction::DismissNotice), window, cx);
+                    })),
+            )
     }
 
     pub(super) fn update_actions(&self, cx: &Context<Self>) -> Option<Div> {
+        if !self.updates.show_download(cx) {
+            return None;
+        }
         let p = self.p;
-        let show_download = self.updates.show_download(cx);
         let download = Button::new("about-download-update")
             .label(self.updates.download_label())
             .custom(self.update_button_style(p.accent_text, cx))
@@ -768,39 +800,20 @@ impl TrafficApp {
                     .size_full(),
             )
         };
-        let notice = self.updates.checks.read(cx).notice().map(|notice| {
-            let (text, color) = match notice {
-                Notice::Update(release) => (format!("发现新版本 {}", release.tag()), p.accent_text),
-                Notice::Result(text) => (text.to_string(), p.muted),
-                Notice::Failed(error) => (error.message().to_string(), p.amber),
-            };
-            row()
-                .gap(px(4.))
-                .flex_1()
-                .min_w_0()
-                .child(label(text, color).min_w_0().text_size(px(12.)).truncate())
-                .child(
-                    Button::new("dismiss-update-notice")
-                        .label("×")
-                        .ghost()
-                        .tooltip("关闭更新提示")
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            app.act(Action::Update(UpdateAction::DismissNotice), window, cx);
-                        })),
-                )
-        });
-        (notice.is_some() || show_download).then(|| {
+        let notice = self.updates.checks.read(cx).notice();
+        Some(
             row()
                 .w_full()
                 .h(px(32.))
                 .justify_end()
                 .gap(px(12.))
-                .children(notice)
-                .when(show_download, |d| {
-                    d.children(self.updates.action_status("about-download-progress", p, cx))
-                        .child(download)
+                .when_some(notice, |d, notice| match notice {
+                    Notice::Update(_) => d.child(self.update_notice(notice, cx).flex_1()),
+                    _ => d,
                 })
-        })
+                .children(self.updates.action_status("about-download-progress", p, cx))
+                .child(download),
+        )
     }
 
     pub(super) fn update_frequency_row(&self, cx: &Context<Self>) -> Div {
@@ -1127,9 +1140,11 @@ impl TrafficApp {
     pub(super) fn set_fixture_latest_release(
         &self,
         release: Option<Release>,
+        manual_feedback: bool,
         cx: &mut Context<Self>,
     ) -> Option<Release> {
         self.updates.checks.update(cx, |checks, cx| {
+            checks.manual_feedback = manual_feedback;
             cx.notify();
             std::mem::replace(&mut checks.cache.latest, release)
         })

@@ -309,7 +309,7 @@ impl TrafficApp {
                                     .text_size(px(12.))
                                     .line_height(px(16.)))
                                 .child(self.update_notes_link(cx)))))
-                    .child(self.check_update_button(cx)))
+                    .child(self.update_check_controls(cx)))
                 .children(self.update_actions(cx))
                 .child(settings_separator(p))
                 .child(self.update_frequency_row(cx)))

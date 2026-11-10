@@ -102,7 +102,7 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
             })??;
             let latest = this.update_in(cx, |app, window, cx| {
                 window.resize(size(px(900.), px(700.)));
-                let latest = app.set_fixture_latest_release(None, cx);
+                let latest = app.set_fixture_latest_release(None, true, cx);
                 app.act(Action::Update(updates::UpdateAction::OpenNotes), window, cx);
                 latest
             })?;
@@ -110,8 +110,9 @@ pub fn schedule(window: &mut Window, cx: &mut Context<TrafficApp>) {
             this.update_in(cx, |app, window, cx| {
                 app.verify_update_dialog_layout(window, false)?;
                 app.verify_update_controls_alignment()?;
+                anyhow::ensure!(app.update_actions(cx).is_none(), "up-to-date feedback created a download row");
                 app.act(Action::Update(updates::UpdateAction::CloseNotes), window, cx);
-                app.set_fixture_latest_release(latest, cx);
+                app.set_fixture_latest_release(latest, false, cx);
                 Ok::<_, anyhow::Error>(())
             })??;
             for (color_theme, theme) in [
