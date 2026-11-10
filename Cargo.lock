@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-traffic"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
